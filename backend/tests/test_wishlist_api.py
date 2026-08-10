@@ -11,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.api import auth, readmoo_replication
-from app.services import platform_auth
+from app.services import kobo_worker, platform_auth
 from app.services.kobo_library_worker import (
     _canonical_isbn_by_platform_id,
     _kobo_detail_is_needed,
@@ -1000,6 +1000,42 @@ class WishlistApiTests(unittest.TestCase):
 
 
 class PlatformStatusTests(unittest.TestCase):
+    def test_kobo_detects_cloudflare_human_verification(self):
+        class FakeLocator:
+            async def inner_text(self):
+                return ""
+
+            async def count(self):
+                return 0
+
+        class FakePage:
+            async def title(self):
+                return "Just a moment..."
+
+            def locator(self, _selector):
+                return FakeLocator()
+
+        visible = asyncio.run(
+            kobo_worker._kobo_human_verification_visible(FakePage())
+        )
+
+        self.assertTrue(visible)
+
+    def test_kobo_waits_for_manual_human_verification(self):
+        page = unittest.mock.Mock()
+        page.wait_for_timeout = AsyncMock()
+        with patch.object(
+            kobo_worker,
+            "_kobo_human_verification_visible",
+            AsyncMock(side_effect=[True, False]),
+        ):
+            completed = asyncio.run(
+                kobo_worker._wait_for_kobo_human_verification(page)
+            )
+
+        self.assertTrue(completed)
+        self.assertEqual(page.wait_for_timeout.await_count, 2)
+
     def test_missing_state_requires_update(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             with patch.object(auth, "BASE_DIR", Path(temporary_directory)):

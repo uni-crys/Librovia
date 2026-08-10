@@ -1,4 +1,5 @@
 # app/services/kobo_worker.py
+import asyncio
 import os
 import urllib.parse
 import json
@@ -17,6 +18,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 # 透過環境變數控制，預設開啟隱藏模式
 IS_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "True").lower() == "true"
+KOBO_HUMAN_VERIFICATION_TIMEOUT_MS = 180000
 
 def get_user_state_path(user_id: str) -> Path:
     return BASE_DIR / "user_profiles" / user_id / "kobo" / "state.json"
@@ -201,6 +203,47 @@ async def _kobo_session_is_usable(page) -> bool:
         return False
 
 
+async def _kobo_human_verification_visible(page) -> bool:
+    try:
+        title = (await page.title()).casefold()
+        body = (await page.locator("body").inner_text()).casefold()
+        challenge_frame_count = await page.locator(
+            "iframe[src*='challenge'], iframe[src*='turnstile']"
+        ).count()
+    except PlaywrightError:
+        return False
+    return (
+        "just a moment" in title
+        or "verify you are human" in body
+        or "確認您是人類" in body
+        or "執行安全性驗證" in body
+        or challenge_frame_count > 0
+    )
+
+
+async def _wait_for_kobo_human_verification(page) -> bool:
+    """Keep visible Chromium open while the user completes Kobo's CAPTCHA."""
+    if not await _kobo_human_verification_visible(page):
+        return True
+
+    print(
+        "[Kobo Import] 偵測到圖靈驗證；請在 noVNC 內手動勾選，"
+        "最多等待三分鐘"
+    )
+    deadline = (
+        asyncio.get_running_loop().time()
+        + KOBO_HUMAN_VERIFICATION_TIMEOUT_MS / 1000
+    )
+    while asyncio.get_running_loop().time() < deadline:
+        await page.wait_for_timeout(1000)
+        if not await _kobo_human_verification_visible(page):
+            await page.wait_for_timeout(1500)
+            print("[Kobo Import] 圖靈驗證已完成，繼續同步")
+            return True
+    print("[Kobo Import] 等待圖靈驗證逾時")
+    return False
+
+
 async def import_kobo_wishlist_to_db(user_id: str) -> dict:
     state_file_path = get_user_state_path(user_id)
     if not state_file_path.exists():
@@ -235,6 +278,14 @@ async def import_kobo_wishlist_to_db(user_id: str) -> dict:
             # 1. 先前往 Kobo 首頁或任意安全頁面建立 Cookie Session
             await page.goto("https://www.kobo.com/tw/zh", wait_until="domcontentloaded", timeout=20000)
             await page.wait_for_timeout(2000)
+            if not await _wait_for_kobo_human_verification(page):
+                set_platform_session_status(user_id, "kobo", "blocked")
+                return {
+                    "platform": "kobo",
+                    "status": "blocked",
+                    "books": 0,
+                    "message": "Kobo 圖靈驗證尚未完成，請使用 noVNC 手動勾選",
+                }
             if not await _kobo_session_is_usable(page):
                 set_platform_session_status(user_id, "kobo", "expired")
                 print("[Kobo Import] 偵測到登入頁或失效憑證，停止同步")
@@ -276,9 +327,19 @@ async def import_kobo_wishlist_to_db(user_id: str) -> dict:
                         remote_books.append({"isbn": str(isbn).strip(), "title": title.strip()})
             else:
                 print(f"[Kobo Import] API 回傳資料格式不符或未取得內容，嘗試導向願望清單頁面...")
-                # 備用方案：如果 API 被擋，才退回原本的網頁導向
+                # Kobo 首頁可能仍有延遲導向。使用獨立分頁，避免它中斷
+                # wishlist 導航；若新頁也出現 CAPTCHA，保留視窗供手動完成。
+                page = await context.new_page()
                 await page.goto("https://www.kobo.com/tw/zh/account/wishlist", wait_until="domcontentloaded", timeout=20000)
                 await page.wait_for_timeout(3000)
+                if not await _wait_for_kobo_human_verification(page):
+                    set_platform_session_status(user_id, "kobo", "blocked")
+                    return {
+                        "platform": "kobo",
+                        "status": "blocked",
+                        "books": 0,
+                        "message": "Kobo 圖靈驗證尚未完成，請使用 noVNC 手動勾選",
+                    }
                 
                 wishlist_gizmo = page.locator(".wishlist-page[data-kobo-gizmo='Wishlist']").first
                 if await wishlist_gizmo.count() > 0:
