@@ -278,16 +278,26 @@ async def verify_readmoo_reader_session(page) -> str:
     ) else "auth_required"
 
 
+def _is_readmoo_dashboard_url(url: str) -> bool:
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").casefold()
+    fragment = parsed.fragment.casefold()
+    return (
+        hostname == "read.readmoo.com"
+        and fragment.startswith("/dashboard")
+    ) or (
+        hostname == "next.readmoo.com"
+        and parsed.path.rstrip("/").casefold() == "/read"
+        and fragment.startswith("/dashboard")
+    )
+
+
 def _readmoo_storefront_callback_completed(page) -> bool:
     parsed = urlparse(page.url)
     hostname = (parsed.hostname or "").casefold()
     callback_key = parse_qs(parsed.query).get("key", [])
-    reader_dashboard = (
-        hostname == "read.readmoo.com"
-        and parsed.fragment.casefold().startswith("/dashboard")
-    )
     return (
-        reader_dashboard
+        _is_readmoo_dashboard_url(page.url)
         or (
             hostname in {"readmoo.com", "www.readmoo.com"}
             and "true" not in {value.casefold() for value in callback_key}
@@ -300,11 +310,7 @@ def _select_login_page(context, current_page, platform: str):
     pages = [page for page in context.pages if not page.is_closed()]
     if platform == "readmoo":
         for candidate in reversed(pages):
-            parsed = urlparse(candidate.url)
-            if (
-                (parsed.hostname or "").casefold() == "read.readmoo.com"
-                and parsed.fragment.casefold().startswith("/dashboard")
-            ):
+            if _is_readmoo_dashboard_url(candidate.url):
                 return candidate
     if current_page in pages:
         return current_page

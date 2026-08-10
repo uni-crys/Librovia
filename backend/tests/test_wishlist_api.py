@@ -1154,6 +1154,9 @@ class PlatformStatusTests(unittest.TestCase):
         self.assertTrue(platform_auth._readmoo_storefront_callback_completed(
             FakePage("https://read.readmoo.com/#/dashboard"),
         ))
+        self.assertTrue(platform_auth._readmoo_storefront_callback_completed(
+            FakePage("https://next.readmoo.com/read#/dashboard"),
+        ))
 
     def test_readmoo_login_follows_dashboard_opened_in_new_tab(self):
         class FakePage:
@@ -1166,6 +1169,26 @@ class PlatformStatusTests(unittest.TestCase):
 
         original = FakePage("https://readmoo.com/")
         dashboard = FakePage("https://read.readmoo.com/#/dashboard")
+        context = unittest.mock.Mock(pages=[original, dashboard])
+
+        selected = platform_auth._select_login_page(
+            context,
+            original,
+            "readmoo",
+        )
+
+        self.assertIs(selected, dashboard)
+
+    def test_readmoo_login_follows_next_dashboard_opened_in_new_tab(self):
+        class FakePage:
+            def __init__(self, url):
+                self.url = url
+
+            def is_closed(self):
+                return False
+
+        original = FakePage("https://readmoo.com/")
+        dashboard = FakePage("https://next.readmoo.com/read#/dashboard")
         context = unittest.mock.Mock(pages=[original, dashboard])
 
         selected = platform_auth._select_login_page(
