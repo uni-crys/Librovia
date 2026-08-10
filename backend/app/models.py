@@ -32,6 +32,14 @@ class Purchase(SQLModel, table=True):
 
 class WishlistItem(SQLModel, table=True):
     __tablename__ = "user_wishlist" # the table name in the database
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "isbn",
+            "platform",
+            name="uq_user_wishlist_user_book_platform",
+        ),
+    )
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: str = Field(index=True) # the user id
     platform: str

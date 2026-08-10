@@ -19,6 +19,20 @@ def _normalized_title(value: str | None) -> str:
     )
 
 
+def _title_identity_variants(value: str | None) -> set[str]:
+    """Return conservative title variants used only for cross-platform identity."""
+
+    normalized = _normalized_title(value)
+    if not normalized:
+        return set()
+
+    variants = {normalized}
+    without_series = normalized.replace("系列", "")
+    if len(without_series) >= 8:
+        variants.add(without_series)
+    return variants
+
+
 def _titles_are_same_book(left: str | None, right: str | None) -> bool:
     """Match exact titles or a distinctive title followed by a subtitle."""
 
@@ -28,7 +42,7 @@ def _titles_are_same_book(left: str | None, right: str | None) -> bool:
     right_normalized = _normalized_title(right_text)
     if not left_normalized or not right_normalized:
         return False
-    if left_normalized == right_normalized:
+    if _title_identity_variants(left_text) & _title_identity_variants(right_text):
         return True
 
     shorter, longer = sorted(
@@ -146,6 +160,24 @@ def remove_stale_synced_wishlist_items(
     return removed
 
 
+def _merge_missing_book_metadata(target: Book, source: Book | None) -> None:
+    """Preserve useful metadata when a platform-specific book is canonicalized."""
+
+    if source is None or source is target:
+        return
+    missing_authors = {None, "", "未知作者"}
+    missing_categories = {None, "", "Unkown", "未分類"}
+    if target.author in missing_authors and source.author not in missing_authors:
+        target.author = source.author
+    if (
+        target.category in missing_categories
+        and source.category not in missing_categories
+    ):
+        target.category = source.category
+    if not target.cover_url and source.cover_url:
+        target.cover_url = source.cover_url
+
+
 def upsert_remote_wishlist_books(
     db: Session,
     *,
@@ -229,6 +261,30 @@ def upsert_remote_wishlist_books(
             db.add(book)
 
         if existing_item is None:
+            existing_item = next(
+                (
+                    item
+                    for item in wishlist_items
+                    if item.platform == platform
+                    and item.isbn == canonical_isbn
+                ),
+                None,
+            )
+
+        duplicate_items = [
+            item
+            for item in wishlist_items
+            if item is not existing_item
+            and item.platform == platform
+            and item.isbn == canonical_isbn
+        ]
+        for duplicate in duplicate_items:
+            db.delete(duplicate)
+            wishlist_items.remove(duplicate)
+        if duplicate_items:
+            db.flush()
+
+        if existing_item is None:
             existing_item = WishlistItem(
                 user_id=user_id,
                 isbn=canonical_isbn,
@@ -239,11 +295,12 @@ def upsert_remote_wishlist_books(
             wishlist_items.append(existing_item)
         else:
             previous_isbn = existing_item.isbn
+            previous_book = db.get(Book, previous_isbn)
+            _merge_missing_book_metadata(book, previous_book)
             existing_item.isbn = canonical_isbn
             existing_item.platform_book_id = platform_book_id
             existing_item.sync_status = "synced"
             if previous_isbn != canonical_isbn:
-                previous_book = db.get(Book, previous_isbn)
                 still_used = any(
                     item is not existing_item and item.isbn == previous_isbn
                     for item in wishlist_items

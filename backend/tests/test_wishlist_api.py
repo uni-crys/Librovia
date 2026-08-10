@@ -305,6 +305,99 @@ class WishlistApiTests(unittest.TestCase):
         self.assertEqual(len(books), 1)
         self.assertIn("一個由血", books[0].title)
 
+    def test_remote_wishlist_merges_series_title_and_preserves_metadata(self):
+        with Session(self.engine) as session:
+            session.add(Book(
+                isbn="210077233000101",
+                title="迷霧之子系列──執法鎔金：自影",
+                category="Unkown",
+            ))
+            session.add(WishlistItem(
+                user_id="reader",
+                platform="readmoo",
+                platform_book_id="210077233000101",
+                isbn="210077233000101",
+                sync_status="synced",
+            ))
+            session.add(Book(
+                isbn="kobo-product-uuid",
+                title="迷霧之子－執法鎔金：自影",
+                author="布蘭登．山德森(Brandon Sanderson)",
+                category="文學小說",
+                cover_url="https://example.test/mistborn.jpg",
+            ))
+            session.add(WishlistItem(
+                user_id="reader",
+                platform="kobo",
+                platform_book_id="kobo-product-uuid",
+                isbn="kobo-product-uuid",
+                sync_status="synced",
+            ))
+            session.commit()
+
+            upsert_remote_wishlist_books(
+                session,
+                user_id="reader",
+                platform="kobo",
+                remote_books=[{
+                    "isbn": "kobo-product-uuid",
+                    "title": "迷霧之子－執法鎔金：自影",
+                }],
+            )
+            session.commit()
+            items = session.exec(select(WishlistItem)).all()
+            books = session.exec(select(Book)).all()
+
+        self.assertEqual({item.isbn for item in items}, {"210077233000101"})
+        self.assertEqual({item.platform for item in items}, {"readmoo", "kobo"})
+        self.assertEqual(len(books), 1)
+        self.assertEqual(
+            books[0].author,
+            "布蘭登．山德森(Brandon Sanderson)",
+        )
+        self.assertEqual(books[0].category, "文學小說")
+        self.assertEqual(books[0].cover_url, "https://example.test/mistborn.jpg")
+
+    def test_remote_wishlist_reuses_same_platform_canonical_item(self):
+        with Session(self.engine) as session:
+            session.add(Book(
+                isbn="9786267952047",
+                title="變臉的緬甸：一個由血、夢想和黃金構成的國度",
+                category="人文社科",
+            ))
+            session.add(WishlistItem(
+                user_id="reader",
+                platform="readmoo",
+                platform_book_id="readmoo-product",
+                isbn="9786267952047",
+                sync_status="synced",
+            ))
+            session.add(WishlistItem(
+                user_id="reader",
+                platform="kobo",
+                platform_book_id="9786267952047",
+                isbn="9786267952047",
+                sync_status="synced",
+            ))
+            session.commit()
+
+            upsert_remote_wishlist_books(
+                session,
+                user_id="reader",
+                platform="kobo",
+                remote_books=[{
+                    "isbn": "kobo-product-uuid",
+                    "title": "變臉的緬甸: 一個由血、夢想和黃金構成的國度",
+                }],
+            )
+            session.commit()
+            items = session.exec(select(WishlistItem)).all()
+
+        kobo_items = [item for item in items if item.platform == "kobo"]
+        self.assertEqual(len(kobo_items), 1)
+        self.assertEqual(kobo_items[0].isbn, "9786267952047")
+        self.assertEqual(kobo_items[0].platform_book_id, "kobo-product-uuid")
+
     def test_short_generic_title_is_not_merged_by_prefix(self):
         with Session(self.engine) as session:
             session.add(Book(
