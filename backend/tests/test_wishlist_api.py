@@ -1155,6 +1155,47 @@ class PlatformStatusTests(unittest.TestCase):
             FakePage("https://read.readmoo.com/#/dashboard"),
         ))
 
+    def test_readmoo_login_follows_dashboard_opened_in_new_tab(self):
+        class FakePage:
+            def __init__(self, url, closed=False):
+                self.url = url
+                self.closed = closed
+
+            def is_closed(self):
+                return self.closed
+
+        original = FakePage("https://readmoo.com/")
+        dashboard = FakePage("https://read.readmoo.com/#/dashboard")
+        context = unittest.mock.Mock(pages=[original, dashboard])
+
+        selected = platform_auth._select_login_page(
+            context,
+            original,
+            "readmoo",
+        )
+
+        self.assertIs(selected, dashboard)
+
+    def test_login_keeps_original_page_without_readmoo_dashboard(self):
+        class FakePage:
+            def __init__(self, url):
+                self.url = url
+
+            def is_closed(self):
+                return False
+
+        original = FakePage("https://readmoo.com/")
+        popup = FakePage("https://idp.readmoo.com/oauth2/authorize")
+        context = unittest.mock.Mock(pages=[original, popup])
+
+        selected = platform_auth._select_login_page(
+            context,
+            original,
+            "readmoo",
+        )
+
+        self.assertIs(selected, original)
+
     def test_readmoo_uses_bundled_chromium_by_default(self):
         chromium = unittest.mock.Mock()
         chromium.launch = AsyncMock(return_value="browser")

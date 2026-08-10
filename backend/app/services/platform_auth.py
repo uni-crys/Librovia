@@ -295,6 +295,22 @@ def _readmoo_storefront_callback_completed(page) -> bool:
     )
 
 
+def _select_login_page(context, current_page, platform: str):
+    """Follow a platform login when OAuth opens or redirects a new tab."""
+    pages = [page for page in context.pages if not page.is_closed()]
+    if platform == "readmoo":
+        for candidate in reversed(pages):
+            parsed = urlparse(candidate.url)
+            if (
+                (parsed.hostname or "").casefold() == "read.readmoo.com"
+                and parsed.fragment.casefold().startswith("/dashboard")
+            ):
+                return candidate
+    if current_page in pages:
+        return current_page
+    return pages[-1] if pages else current_page
+
+
 async def verify_readmoo_storefront_session(
     page,
     *,
@@ -365,6 +381,7 @@ async def login_and_save_platform_state(
 
             deadline = asyncio.get_running_loop().time() + LOGIN_TIMEOUT_SECONDS
             while asyncio.get_running_loop().time() < deadline:
+                page = _select_login_page(context, page, platform)
                 if (
                     platform == "readmoo"
                     and await _readmoo_login_is_blocked(page)
