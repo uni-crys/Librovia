@@ -245,7 +245,7 @@ async def verify_readmoo_reader_session(page) -> str:
     """Validate the post-login reader session before persisting state.json."""
     try:
         await page.goto(
-            "https://read.readmoo.com/#/dashboard",
+            "https://next.readmoo.com/read/#/dashboard",
             wait_until="domcontentloaded",
             timeout=30000,
         )

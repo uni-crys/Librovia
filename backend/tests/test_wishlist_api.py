@@ -567,7 +567,17 @@ class WishlistApiTests(unittest.TestCase):
             )
         )
         self.assertTrue(
+            is_readmoo_dashboard_url(
+                "https://next.readmoo.com/read/#/dashboard"
+            )
+        )
+        self.assertTrue(
             is_readmoo_library_url("https://read.readmoo.com/#/library")
+        )
+        self.assertTrue(
+            is_readmoo_library_url(
+                "https://next.readmoo.com/read/#/library"
+            )
         )
         self.assertFalse(
             is_readmoo_library_url("https://read.readmoo.com/#/dashboard")

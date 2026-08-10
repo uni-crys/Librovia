@@ -382,7 +382,11 @@ async def import_readmoo_library_to_db(user_id: str, limit: int | None = None):
             )
             
             # 1. 前往閱讀器首頁 / 總覽
-            await page.goto("https://read.readmoo.com/#/dashboard", wait_until="domcontentloaded", timeout=30000)
+            await page.goto(
+                "https://next.readmoo.com/read/#/dashboard",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
             dashboard_status = await wait_for_stable_route(
                 page,
                 is_readmoo_dashboard_url,
@@ -478,7 +482,8 @@ async def import_readmoo_library_to_db(user_id: str, limit: int | None = None):
                     "new_books": 0,
                 }
 
-            # 4. 點擊 accordion 內真正導航到 #/library 的「書籍」連結。
+            # 4. 只有在「書櫃」accordion 展開後，才點擊其中真正導航到
+            # next.readmoo.com/read/#/library 的「書籍」連結。
             print("[Readmoo Library Import] 正在點擊「書籍」...")
             try:
                 books_btn = await _first_visible(

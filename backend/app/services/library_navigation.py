@@ -3,6 +3,7 @@
 import asyncio
 import time
 from collections.abc import Callable
+from urllib.parse import urlparse
 
 from playwright.async_api import Error as PlaywrightError
 
@@ -68,11 +69,31 @@ async def wait_for_stable_route(
 
 
 def is_readmoo_dashboard_url(url: str) -> bool:
-    return "read.readmoo.com/" in url.casefold() and "#/dashboard" in url.casefold()
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").casefold()
+    fragment = parsed.fragment.casefold()
+    return (
+        hostname == "read.readmoo.com"
+        and fragment.startswith("/dashboard")
+    ) or (
+        hostname == "next.readmoo.com"
+        and parsed.path.rstrip("/").casefold() == "/read"
+        and fragment.startswith("/dashboard")
+    )
 
 
 def is_readmoo_library_url(url: str) -> bool:
-    return "read.readmoo.com/" in url.casefold() and "#/library" in url.casefold()
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").casefold()
+    fragment = parsed.fragment.casefold()
+    return (
+        hostname == "read.readmoo.com"
+        and fragment.startswith("/library")
+    ) or (
+        hostname == "next.readmoo.com"
+        and parsed.path.rstrip("/").casefold() == "/read"
+        and fragment.startswith("/library")
+    )
 
 
 def is_kobo_home_url(url: str) -> bool:
