@@ -16,11 +16,66 @@ from app.services.metadata_matching import (
     decide_metadata_match,
     metadata_book_values,
 )
-from app.services.metadata_pipeline import fetch_and_clean_metadata
+from app.services.metadata_pipeline import fetch_and_clean_metadata, normalize_text
 
 LOGGER = logging.getLogger("librovia.metadata_queue")
 MAX_ATTEMPTS = 3
 _processor_lock = asyncio.Lock()
+
+
+def _titles_are_distinctive_extensions(
+    left: str | None,
+    right: str | None,
+) -> bool:
+    left_text = str(left or "").strip()
+    right_text = str(right or "").strip()
+    left_normalized = normalize_text(left_text)
+    right_normalized = normalize_text(right_text)
+    if not left_normalized or not right_normalized:
+        return False
+    if left_normalized == right_normalized:
+        return True
+
+    shorter, longer = sorted(
+        (left_text, right_text),
+        key=lambda value: len(normalize_text(value)),
+    )
+    if len(normalize_text(shorter)) < 4:
+        return False
+    return any(
+        longer.startswith(f"{shorter}{separator}")
+        for separator in ("：", ":", "（", "(", " ")
+    )
+
+
+def _find_unique_platform_rekey_candidate(
+    purchases: list[Purchase],
+    books_by_isbn: dict[str, Book | None],
+    *,
+    platform: str,
+    remote_platform_ids: set[str],
+    raw_title: str,
+    platform_author: str,
+) -> Purchase | None:
+    normalized_author = normalize_text(platform_author)
+    if not normalized_author or platform_author == "未知作者":
+        return None
+
+    candidates = []
+    for purchase in purchases:
+        if purchase.platform != platform:
+            continue
+        if str(purchase.platform_book_id or "") in remote_platform_ids:
+            continue
+        book = books_by_isbn.get(purchase.isbn)
+        if book is None:
+            continue
+        if normalize_text(book.author) != normalized_author:
+            continue
+        if not _titles_are_distinctive_extensions(book.title, raw_title):
+            continue
+        candidates.append(purchase)
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _canonical_isbn_by_platform_id(
@@ -95,6 +150,14 @@ def stage_library_snapshot(
         for purchase in purchases
         if purchase.platform_book_id
     }
+    books_by_isbn = {
+        purchase.isbn: db.get(Book, purchase.isbn)
+        for purchase in purchases
+    }
+    remote_platform_ids = {
+        str(item.get("isbn") or "").strip()
+        for item in remote_books
+    }
     new_books = 0
     updated_books = 0
     queued_jobs = 0
@@ -105,14 +168,33 @@ def stage_library_snapshot(
             break
         staged_books += 1
         platform_book_id = str(item["isbn"]).strip()
-        raw_identifier = str(
-            item.get("metadata_identifier")
-            or isbn_by_platform_id.get(platform_book_id)
-            or platform_book_id
-        ).strip()
         raw_title = str(item.get("title") or "未知書名").strip()
         platform_author = str(
             item.get("platform_author") or "未知作者"
+        ).strip()
+        purchase = purchases_by_platform_id.get(platform_book_id)
+        rekeyed_purchase = False
+        if purchase is None:
+            purchase = _find_unique_platform_rekey_candidate(
+                purchases,
+                books_by_isbn,
+                platform=platform,
+                remote_platform_ids=remote_platform_ids,
+                raw_title=raw_title,
+                platform_author=platform_author,
+            )
+            if purchase is not None:
+                old_platform_book_id = str(purchase.platform_book_id or "")
+                purchases_by_platform_id.pop(old_platform_book_id, None)
+                purchase.platform_book_id = platform_book_id
+                purchases_by_platform_id[platform_book_id] = purchase
+                db.add(purchase)
+                rekeyed_purchase = True
+        raw_identifier = str(
+            (purchase.isbn if rekeyed_purchase else None)
+            or item.get("metadata_identifier")
+            or isbn_by_platform_id.get(platform_book_id)
+            or platform_book_id
         ).strip()
         platform_category = str(
             item.get("platform_category") or "未分類"
@@ -140,6 +222,16 @@ def stage_library_snapshot(
         ):
             db.add(book)
             updated_books += 1
+        elif (
+            _titles_are_distinctive_extensions(book.title, raw_title)
+            and len(raw_title) > len(book.title)
+        ):
+            book.title = raw_title
+            db.add(book)
+            updated_books += 1
+        if crawler_cover and not book.cover_url:
+            book.cover_url = crawler_cover
+            db.add(book)
         if (
             platform_author != "未知作者"
             and (not book.author or book.author == "未知作者")
@@ -156,7 +248,6 @@ def stage_library_snapshot(
             book.category = platform_category
             db.add(book)
 
-        purchase = purchases_by_platform_id.get(platform_book_id)
         if purchase is None:
             purchase = Purchase(
                 user_id=user_id,

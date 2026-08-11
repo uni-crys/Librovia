@@ -78,6 +78,22 @@ KOBO_HIERARCHICAL_CATEGORY_ALIASES = {
 }
 
 
+class KoboLibrarySnapshotIncomplete(RuntimeError):
+    """Raised when a paginated Kobo library page did not finish loading."""
+
+
+async def _require_kobo_library_items(page, page_num: int) -> None:
+    try:
+        await page.wait_for_selector(
+            "li.item-wrapper.book, .book-item",
+            timeout=15000,
+        )
+    except Exception as error:
+        raise KoboLibrarySnapshotIncomplete(
+            f"Kobo 書櫃第 {page_num} 頁載入逾時，本次未寫入不完整快照"
+        ) from error
+
+
 def map_kobo_category(category_names: list[str] | None) -> str:
     categories = [
         str(category_name).strip()
@@ -674,11 +690,7 @@ async def import_kobo_library_to_db(
             while True:
                 print(f"[Kobo Library Import] 正在爬取第 {page_num} 頁...")
                 
-                try:
-                    await page.wait_for_selector("li.item-wrapper.book, .book-item", timeout=15000)
-                except Exception:
-                    print(f"[Kobo Library Import] 第 {page_num} 頁等待書櫃項目逾時")
-                    break
+                await _require_kobo_library_items(page, page_num)
 
                 await page.wait_for_timeout(3000)
 
@@ -808,6 +820,18 @@ async def import_kobo_library_to_db(
                 "updated_books": updated_books_count,
                 "remote_books": len(remote_books),
                 "metadata_jobs": staged["metadata_jobs"] if remote_books else 0,
+            }
+        except KoboLibrarySnapshotIncomplete as error:
+            LOGGER.warning(
+                str(error),
+                extra={"platform": "kobo", "result": "incomplete_snapshot"},
+            )
+            return {
+                "platform": "kobo",
+                "status": "failed",
+                "message": str(error),
+                "new_books": 0,
+                "updated_books": 0,
             }
         except Exception:
             LOGGER.exception(

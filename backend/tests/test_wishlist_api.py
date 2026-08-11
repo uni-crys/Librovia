@@ -13,6 +13,8 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from app.api import auth, readmoo_replication
 from app.services import kobo_worker, platform_auth
 from app.services.kobo_library_worker import (
+    KoboLibrarySnapshotIncomplete,
+    _require_kobo_library_items,
     _canonical_isbn_by_platform_id,
     _kobo_detail_is_needed,
     extract_kobo_book_id,
@@ -469,6 +471,16 @@ class WishlistApiTests(unittest.TestCase):
             _canonical_isbn_by_platform_id(purchases),
             {"kobo-product-uuid": "9786263901438"},
         )
+
+    def test_kobo_page_timeout_marks_snapshot_incomplete(self):
+        page = unittest.mock.Mock()
+        page.wait_for_selector = AsyncMock(side_effect=TimeoutError("timeout"))
+
+        with self.assertRaisesRegex(
+            KoboLibrarySnapshotIncomplete,
+            "第 2 頁載入逾時",
+        ):
+            asyncio.run(_require_kobo_library_items(page, 2))
 
     def test_kobo_book_id_parser_reads_detail_label(self):
         self.assertEqual(

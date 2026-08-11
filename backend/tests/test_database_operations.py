@@ -282,6 +282,80 @@ class MetadataQueueTests(unittest.TestCase):
 
         self.assertEqual(book.category, "文學小說")
 
+    def test_staging_rekeys_transferred_purchase_by_title_and_author(self):
+        with Session(self.engine) as db:
+            db.add(Book(
+                isbn="9786267686706",
+                title=(
+                    "盛世之鑰: 為何開放的社會更強大?"
+                    "從七個黃金時代看文明興衰的真相"
+                ),
+                author="約翰‧諾貝里",
+                category="人文社科",
+            ))
+            db.add(Purchase(
+                user_id="reader",
+                platform="readmoo",
+                platform_book_id="9786267686706",
+                isbn="9786267686706",
+            ))
+            db.commit()
+
+            result = stage_library_snapshot(
+                db,
+                user_id="reader",
+                platform="readmoo",
+                remote_books=[{
+                    "isbn": "19207523",
+                    "metadata_identifier": "9786267686683",
+                    "title": "盛世之鑰",
+                    "platform_author": "約翰‧諾貝里",
+                    "platform_category": "人文社科",
+                    "cover_url": "https://example.test/key.jpg",
+                }],
+            )
+            purchases = db.exec(select(Purchase)).all()
+            books = db.exec(select(Book)).all()
+
+        self.assertEqual(result["new_books"], 0)
+        self.assertEqual(len(purchases), 1)
+        self.assertEqual(purchases[0].platform_book_id, "19207523")
+        self.assertEqual(purchases[0].isbn, "9786267686706")
+        self.assertEqual(len(books), 1)
+        self.assertIn("為何開放", books[0].title)
+        self.assertEqual(books[0].cover_url, "https://example.test/key.jpg")
+
+    def test_staging_does_not_rekey_same_title_with_different_author(self):
+        with Session(self.engine) as db:
+            db.add(Book(
+                isbn="existing-book",
+                title="共同書名：既有副標題",
+                author="甲作者",
+                category="人文社科",
+            ))
+            db.add(Purchase(
+                user_id="reader",
+                platform="readmoo",
+                platform_book_id="old-platform-id",
+                isbn="existing-book",
+            ))
+            db.commit()
+
+            result = stage_library_snapshot(
+                db,
+                user_id="reader",
+                platform="readmoo",
+                remote_books=[{
+                    "isbn": "new-platform-id",
+                    "title": "共同書名",
+                    "platform_author": "乙作者",
+                }],
+            )
+            purchases = db.exec(select(Purchase)).all()
+
+        self.assertEqual(result["new_books"], 1)
+        self.assertEqual(len(purchases), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
