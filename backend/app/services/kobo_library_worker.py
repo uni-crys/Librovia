@@ -567,9 +567,6 @@ def get_user_state_path(user_id: str) -> Path:
 async def import_kobo_library_to_db(
     user_id: str,
     limit: int | None = None,
-    *,
-    force_detail_refresh: bool = False,
-    detail_platform_book_ids: set[str] | None = None,
 ):
     effective_limit = limit if limit is not None and limit > 0 else None
     state_file_path = get_user_state_path(user_id)
@@ -771,25 +768,6 @@ async def import_kobo_library_to_db(
             print(f"[Kobo Library Import] 總共成功解析 {len(remote_books)} 本已購書籍")
 
             if len(remote_books) > 0:
-                detail_books = _kobo_items_needing_detail(
-                    user_id,
-                    remote_books,
-                    force_refresh=force_detail_refresh,
-                )
-                if detail_platform_book_ids is not None:
-                    detail_books = [
-                        item
-                        for item in detail_books
-                        if str(item["isbn"]) in detail_platform_book_ids
-                    ]
-                resolved_ids = await enrich_kobo_book_ids(
-                    context,
-                    detail_books,
-                )
-                print(
-                    "[Kobo Library Import] 增量商品頁解析完成，"
-                    f"取得 {resolved_ids}/{len(detail_books)} 筆"
-                )
                 with Session(engine) as db:
                     staged = stage_library_snapshot(
                         db,
@@ -798,7 +776,6 @@ async def import_kobo_library_to_db(
                         remote_books=remote_books,
                         limit=effective_limit,
                     )
-                _record_kobo_detail_attempts(user_id, detail_books)
                 new_books_count = staged["new_books"]
                 updated_books_count = staged["updated_books"]
                 print(

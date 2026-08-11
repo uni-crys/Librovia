@@ -43,7 +43,15 @@ export const libraryService = {
     return response.data;
   },
 
-  // 5. 取得待購清單
+  // 5. 手動強制重試已達上限或仍缺漏的 metadata 工作
+  retryMetadata: async (userId) => {
+    const response = await apiClient.post('/library/metadata-retry', null, {
+      params: { user_id: userId },
+    });
+    return response.data;
+  },
+
+  // 6. 取得待購清單
   getWishlist: async (userId) => {
     const response = await apiClient.get('/wishlist/', {
       params: { user_id: userId },
@@ -51,7 +59,7 @@ export const libraryService = {
     return response.data;
   },
 
-  // 6. 新增書籍至待購清單
+  // 7. 新增書籍至待購清單
   addToWishlist: async (userId, query) => {
     const response = await apiClient.post('/wishlist/', {
       user_id: userId,
@@ -60,7 +68,7 @@ export const libraryService = {
     return response.data;
   },
 
-  // 7. 觸發待購清單同步/爬取
+  // 8. 觸發待購清單同步/爬取
   importWishlist: async (userId) => {
     const response = await apiClient.post('/wishlist/import', null, {
       params: { user_id: userId },
@@ -68,7 +76,7 @@ export const libraryService = {
     return response.data;
   },
 
-  // 8. 從待購清單移除書籍
+  // 9. 從待購清單移除書籍
   removeFromWishlist: async (isbn, userId) => {
     const response = await apiClient.delete(`/wishlist/${isbn}`, {
       params: { user_id: userId },
@@ -76,7 +84,7 @@ export const libraryService = {
     return response.data;
   },
 
-  // 9. 將一或多本待購書籍標記為已購並移入書櫃
+  // 10. 將一或多本待購書籍標記為已購並移入書櫃
   transferWishlistBooks: async (userId, isbns, platforms) => {
     const response = await apiClient.post('/wishlist/transfer', {
       user_id: userId,
@@ -86,7 +94,7 @@ export const libraryService = {
     return response.data;
   },
 
-  // 10. 取得 Readmoo / Kobo 登入憑證狀態
+  // 11. 取得 Readmoo / Kobo 登入憑證狀態
   getPlatformStatus: async (userId) => {
     const response = await apiClient.get('/auth/status', {
       params: { user_id: userId },
@@ -94,7 +102,7 @@ export const libraryService = {
     return response.data;
   },
 
-  // 11. 開啟平台登入視窗並儲存該使用者的新憑證
+  // 12. 開啟平台登入視窗並儲存該使用者的新憑證
   loginPlatform: async (userId, platform) => {
     const response = await apiClient.post('/auth/login', null, {
       params: { user_id: userId, platform },

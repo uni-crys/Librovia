@@ -87,5 +87,6 @@ class MetadataJob(SQLModel, table=True):
     attempts: int = Field(default=0)
     result: Optional[str] = None
     last_error_type: Optional[str] = None
+    next_retry_at: Optional[datetime] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

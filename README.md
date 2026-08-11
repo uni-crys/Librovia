@@ -213,31 +213,27 @@ python scripts/manage_database.py restore \
 ### 工作佇列評估
 
 書櫃匯入採兩階段流程：先抓完 Readmoo/Kobo 書櫃並將原始書名、封面與購買關聯
-寫入 SQLite，立即讓前端顯示；需要比對的 metadata 再寫入 `metadata_jobs`，
+寫入 SQLite，立即讓前端顯示；書櫃 API／列表仍缺少的 metadata 再寫入 `metadata_jobs`，
 由 response 後的 `BackgroundTasks` 立即喚醒處理器，APScheduler 每分鐘也會
 接手尚未完成的工作。`GET /library/metadata-status?user_id=...` 可查詢
-`pending`、`running`、`completed` 與 `failed` 數量；單筆最多嘗試三次。
+`pending`、`running`、`completed`、`failed` 與 `manual_review` 數量。
+失敗工作從 24 小時開始 exponential backoff，單筆最多自動嘗試三次；達上限後
+可由書櫃頁手動重試，或呼叫 `POST /library/metadata-retry?user_id=...`。
 
 Readmoo 匯入器會監聽登入後閱讀器本身使用的官方書櫃 API，以平台書籍 ID 合併
-ISBN、作者、封面與分類；若 API 欄位缺漏，才以隔離、未登入的公開商品頁搜尋
-補抓。平台資料先寫入避免前端空白，但新書與原本資料不完整的書仍進入 pipeline。
+ISBN、作者、封面與分類。平台資料先寫入避免前端空白，但 API 欄位缺漏的新書與
+原本資料不完整的書會進入共用 pipeline，不在平台同步期間逐本開啟商品頁。
 可靠資料的查找順序是國圖、Books.com.tw、Readmoo、Kobo、Open Library、
 Google Books；Kobo 候選僅在同步取得該商品資料時存在。同步紀錄不包含 cookie、
 token、書名或其他使用者內容。
 
-Kobo 書櫃列表的 UUID 僅保存為 `platform_book_id`；匯入器會以有限並行讀取商品
-頁 `.bookitem-secondary-metadata` 的「書籍ID」，驗證為 ISBN 後供 metadata
-比對與跨平台去重。Kobo 商品頁的作者與封面可作為平台原始資料；分類只採用
-`data-track-info` 明確標示為 `category` 的商品分類連結，映射為 Librovia 標準
-分類後僅補入仍未分類的書籍。平台 fallback 以 Readmoo 優先於 Kobo；Kobo
+Kobo 書櫃列表的 UUID 僅保存為 `platform_book_id`；列表封面會直接採用，缺少的
+ISBN、作者、封面或分類再交由共用 metadata pipeline。平台 fallback 以 Readmoo
+優先於 Kobo；Kobo
 不覆蓋已有分類，即使先同步 Kobo，後續 Readmoo 同步仍可更新成 Readmoo
-分類，而 pipeline 的較高優先序可靠結果仍可覆蓋兩者。Kobo 映射優先使用
-「企業與金融」、「小說與文學」等主分類；主分類為過度籠統的「非小說」時，
-才使用「科學與自然」、「健康與幸福」等子分類。正常同步只對缺 ISBN、作者、
-封面或分類的項目開啟商品頁；完整結果由 SQLite 的 `Book` 與 `Purchase`
-持久保存。失敗狀態、嘗試次數與下次可重試時間也會寫入 SQLite，從 24 小時
-開始 exponential backoff，三次仍不完整則標記 `manual_review`。維護時可
-明確傳入 `force_detail_refresh=True` 做全量詳情刷新。
+分類，而 pipeline 的較高優先序可靠結果仍可覆蓋兩者。完整結果由 SQLite 的
+`Book` 與 `Purchase` 持久保存；共用 job 的失敗狀態、嘗試次數與下次可重試
+時間也會寫入 SQLite。
 
 現階段 Librovia 是單機、低頻率同步，SQLite durable job table 加上 FastAPI
 `BackgroundTasks` 與 APScheduler 已足夠，暫不引入 Redis。job 本身可跨 process

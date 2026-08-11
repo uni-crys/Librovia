@@ -2,6 +2,7 @@ import asyncio
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -17,6 +18,7 @@ from app.models import Book, MetadataJob, Purchase
 from app.services import library_import_queue
 from app.services.library_import_queue import (
     process_metadata_queue,
+    retry_incomplete_metadata_jobs,
     stage_library_snapshot,
 )
 
@@ -155,6 +157,7 @@ class MetadataQueueTests(unittest.TestCase):
 
         self.assertEqual(book.author, "平台作者")
         self.assertEqual(book.category, "心理勵志")
+        self.assertEqual(result["metadata_jobs"], 0)
 
     def test_processor_canonicalizes_purchase_and_completes_job(self):
         with Session(self.engine) as db:
@@ -355,6 +358,156 @@ class MetadataQueueTests(unittest.TestCase):
 
         self.assertEqual(result["new_books"], 1)
         self.assertEqual(len(purchases), 2)
+
+    def test_staging_does_not_reset_metadata_backoff(self):
+        retry_at = datetime.utcnow() + timedelta(hours=12)
+        with Session(self.engine) as db:
+            db.add(Book(
+                isbn="incomplete-book",
+                title="缺封面的書",
+                author="作者",
+                category="人文社科",
+            ))
+            db.add(Purchase(
+                user_id="reader",
+                platform="readmoo",
+                platform_book_id="readmoo-incomplete",
+                isbn="incomplete-book",
+            ))
+            db.add(MetadataJob(
+                user_id="reader",
+                platform="readmoo",
+                platform_book_id="readmoo-incomplete",
+                raw_identifier="incomplete-book",
+                raw_title="缺封面的書",
+                status="failed",
+                attempts=2,
+                next_retry_at=retry_at,
+            ))
+            db.commit()
+
+            result = stage_library_snapshot(
+                db,
+                user_id="reader",
+                platform="readmoo",
+                remote_books=[{
+                    "isbn": "readmoo-incomplete",
+                    "title": "缺封面的書",
+                    "platform_author": "作者",
+                    "platform_category": "人文社科",
+                }],
+            )
+            job = db.exec(select(MetadataJob)).one()
+
+        self.assertEqual(result["metadata_jobs"], 0)
+        self.assertEqual(job.status, "failed")
+        self.assertEqual(job.attempts, 2)
+        self.assertEqual(job.next_retry_at, retry_at)
+
+    def test_metadata_failures_back_off_then_require_manual_review(self):
+        with Session(self.engine) as db:
+            stage_library_snapshot(
+                db,
+                user_id="reader",
+                platform="kobo",
+                remote_books=[{
+                    "isbn": "kobo-incomplete",
+                    "title": "缺少資料的書",
+                }],
+            )
+
+        with (
+            patch.object(library_import_queue, "engine", self.engine),
+            patch.object(
+                library_import_queue,
+                "fetch_and_clean_metadata",
+                AsyncMock(side_effect=RuntimeError("unavailable")),
+            ),
+        ):
+            for expected_attempt in range(1, 4):
+                result = asyncio.run(process_metadata_queue())
+                self.assertEqual(result["failed"], 1)
+                with Session(self.engine) as db:
+                    job = db.exec(select(MetadataJob)).one()
+                    self.assertEqual(job.attempts, expected_attempt)
+                    if expected_attempt < 3:
+                        self.assertEqual(job.status, "failed")
+                        self.assertIsNotNone(job.next_retry_at)
+                        job.next_retry_at = datetime.utcnow() - timedelta(seconds=1)
+                        db.add(job)
+                        db.commit()
+                    else:
+                        self.assertEqual(job.status, "manual_review")
+                        self.assertIsNone(job.next_retry_at)
+
+    def test_incomplete_metadata_result_uses_shared_backoff(self):
+        with Session(self.engine) as db:
+            stage_library_snapshot(
+                db,
+                user_id="reader",
+                platform="readmoo",
+                remote_books=[{
+                    "isbn": "readmoo-incomplete-result",
+                    "title": "仍缺資料的書",
+                }],
+            )
+
+        with (
+            patch.object(library_import_queue, "engine", self.engine),
+            patch.object(
+                library_import_queue,
+                "fetch_and_clean_metadata",
+                AsyncMock(return_value={
+                    "source": "fallback",
+                    "title": "仍缺資料的書",
+                }),
+            ),
+        ):
+            result = asyncio.run(process_metadata_queue())
+
+        with Session(self.engine) as db:
+            job = db.exec(select(MetadataJob)).one()
+        self.assertEqual(result["processed"], 0)
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(job.status, "failed")
+        self.assertEqual(job.last_error_type, "IncompleteMetadata")
+        self.assertIsNotNone(job.next_retry_at)
+
+    def test_manual_retry_resets_only_incomplete_jobs(self):
+        with Session(self.engine) as db:
+            db.add(Book(
+                isbn="manual-book",
+                title="待手動補資料",
+                author="作者",
+                category="人文社科",
+            ))
+            db.add(Purchase(
+                user_id="reader",
+                platform="kobo",
+                platform_book_id="manual-platform-id",
+                isbn="manual-book",
+            ))
+            db.add(MetadataJob(
+                user_id="reader",
+                platform="kobo",
+                platform_book_id="manual-platform-id",
+                raw_identifier="manual-book",
+                raw_title="待手動補資料",
+                status="manual_review",
+                attempts=3,
+                last_error_type="IncompleteMetadata",
+            ))
+            db.commit()
+
+        with patch.object(library_import_queue, "engine", self.engine):
+            retried = retry_incomplete_metadata_jobs("reader")
+
+        with Session(self.engine) as db:
+            job = db.exec(select(MetadataJob)).one()
+        self.assertEqual(retried, 1)
+        self.assertEqual(job.status, "pending")
+        self.assertEqual(job.attempts, 0)
+        self.assertIsNone(job.last_error_type)
 
 
 if __name__ == "__main__":

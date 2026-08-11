@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlmodel import Session, select
 
@@ -119,13 +119,41 @@ def _enqueue_job(
         job.raw_identifier = raw_identifier
         job.raw_title = raw_title
         job.crawler_cover = crawler_cover
-        job.status = "pending"
-        job.attempts = 0
-        job.result = None
-        job.last_error_type = None
+        if job.status == "completed":
+            # A completed job whose book is still incomplete should not be
+            # silently reset by every platform sync. Surface it for an
+            # explicit manual retry instead.
+            job.status = "manual_review"
+            job.attempts = max(job.attempts, MAX_ATTEMPTS)
+            job.next_retry_at = None
+            job.last_error_type = "IncompleteMetadata"
         job.updated_at = datetime.utcnow()
     db.add(job)
-    return created
+    return created or job.status == "pending"
+
+
+def _complete_existing_job(
+    db: Session,
+    *,
+    user_id: str,
+    platform: str,
+    platform_book_id: str,
+) -> None:
+    job = db.exec(
+        select(MetadataJob).where(
+            MetadataJob.user_id == user_id,
+            MetadataJob.platform == platform,
+            MetadataJob.platform_book_id == platform_book_id,
+        )
+    ).first()
+    if job is None or job.status == "completed":
+        return
+    job.status = "completed"
+    job.result = "platform_snapshot"
+    job.last_error_type = None
+    job.next_retry_at = None
+    job.updated_at = datetime.utcnow()
+    db.add(job)
 
 
 def stage_library_snapshot(
@@ -201,9 +229,6 @@ def stage_library_snapshot(
         ).strip()
         crawler_cover = item.get("cover_url")
         book = db.get(Book, raw_identifier)
-        needs_authoritative_metadata = (
-            book is None or book_metadata_is_incomplete(book)
-        )
         if book is None:
             book = Book(
                 isbn=raw_identifier,
@@ -297,8 +322,8 @@ def stage_library_snapshot(
             if previous_book is not None and not still_used:
                 db.delete(previous_book)
 
-        if needs_authoritative_metadata or book_metadata_is_incomplete(book):
-            _enqueue_job(
+        if book_metadata_is_incomplete(book):
+            queued_jobs += int(_enqueue_job(
                 db,
                 user_id=user_id,
                 platform=platform,
@@ -306,8 +331,14 @@ def stage_library_snapshot(
                 raw_identifier=book.isbn,
                 raw_title=raw_title,
                 crawler_cover=crawler_cover,
+            ))
+        else:
+            _complete_existing_job(
+                db,
+                user_id=user_id,
+                platform=platform,
+                platform_book_id=platform_book_id,
             )
-            queued_jobs += 1
 
     db.commit()
     return {
@@ -317,11 +348,30 @@ def stage_library_snapshot(
     }
 
 
-def _apply_job_result(job_id: int, metadata: dict) -> str:
+def _record_job_failure(
+    job: MetadataJob,
+    error_type: str,
+    *,
+    now: datetime | None = None,
+) -> None:
+    failed_at = now or datetime.utcnow()
+    job.last_error_type = error_type
+    job.updated_at = failed_at
+    if job.attempts >= MAX_ATTEMPTS:
+        job.status = "manual_review"
+        job.next_retry_at = None
+        return
+    job.status = "failed"
+    job.next_retry_at = failed_at + timedelta(
+        hours=24 * (2 ** max(0, job.attempts - 1))
+    )
+
+
+def _apply_job_result(job_id: int, metadata: dict) -> bool:
     with Session(engine) as db:
         job = db.get(MetadataJob, job_id)
         if job is None:
-            return "missing"
+            return False
         purchase = db.exec(
             select(Purchase).where(
                 Purchase.user_id == job.user_id,
@@ -384,13 +434,17 @@ def _apply_job_result(job_id: int, metadata: dict) -> str:
             if not still_used:
                 db.delete(source_book)
 
-        job.status = "completed"
         job.result = decision.action.value
-        job.last_error_type = None
-        job.updated_at = datetime.utcnow()
+        if book_metadata_is_incomplete(target_book):
+            _record_job_failure(job, "IncompleteMetadata")
+        else:
+            job.status = "completed"
+            job.last_error_type = None
+            job.next_retry_at = None
+            job.updated_at = datetime.utcnow()
         db.add(job)
         db.commit()
-        return decision.action.value
+        return job.status == "completed"
 
 
 async def process_metadata_queue(batch_size: int = 25) -> dict[str, int]:
@@ -401,16 +455,25 @@ async def process_metadata_queue(batch_size: int = 25) -> dict[str, int]:
     processed = 0
     failed = 0
     async with _processor_lock:
+        queue_time = datetime.utcnow()
         with Session(engine) as db:
-            jobs = db.exec(
+            candidates = db.exec(
                 select(MetadataJob)
                 .where(
                     MetadataJob.status.in_(["pending", "failed", "running"]),
                     MetadataJob.attempts < MAX_ATTEMPTS,
                 )
                 .order_by(MetadataJob.created_at)
-                .limit(batch_size)
             ).all()
+            jobs = [
+                job
+                for job in candidates
+                if (
+                    job.status in {"pending", "running"}
+                    or job.next_retry_at is None
+                    or job.next_retry_at <= queue_time
+                )
+            ][:batch_size]
             job_ids = [job.id for job in jobs if job.id is not None]
 
         for job_id in job_ids:
@@ -420,6 +483,7 @@ async def process_metadata_queue(batch_size: int = 25) -> dict[str, int]:
                     continue
                 job.status = "running"
                 job.attempts += 1
+                job.next_retry_at = None
                 job.updated_at = datetime.utcnow()
                 db.add(job)
                 db.commit()
@@ -454,16 +518,16 @@ async def process_metadata_queue(batch_size: int = 25) -> dict[str, int]:
                     raw_title=raw_title,
                     platform_fallback=platform_fallback,
                 )
-                _apply_job_result(job_id, metadata)
-                processed += 1
+                if _apply_job_result(job_id, metadata):
+                    processed += 1
+                else:
+                    failed += 1
             except Exception as error:
                 failed += 1
                 with Session(engine) as db:
                     job = db.get(MetadataJob, job_id)
                     if job:
-                        job.status = "failed"
-                        job.last_error_type = type(error).__name__
-                        job.updated_at = datetime.utcnow()
+                        _record_job_failure(job, type(error).__name__)
                         db.add(job)
                         db.commit()
                 LOGGER.exception(
@@ -486,8 +550,49 @@ def metadata_queue_status(user_id: str) -> dict[str, int]:
         "running": 0,
         "completed": 0,
         "failed": 0,
+        "manual_review": 0,
     }
     for job in jobs:
         counts[job.status] = counts.get(job.status, 0) + 1
     counts["total"] = len(jobs)
     return counts
+
+
+def retry_incomplete_metadata_jobs(
+    user_id: str,
+    *,
+    platform: str | None = None,
+    platform_book_id: str | None = None,
+) -> int:
+    """Force incomplete jobs back to pending after an explicit user action."""
+
+    retried = 0
+    with Session(engine) as db:
+        jobs = db.exec(
+            select(MetadataJob).where(MetadataJob.user_id == user_id)
+        ).all()
+        for job in jobs:
+            if platform and job.platform != platform:
+                continue
+            if platform_book_id and job.platform_book_id != platform_book_id:
+                continue
+            purchase = db.exec(
+                select(Purchase).where(
+                    Purchase.user_id == job.user_id,
+                    Purchase.platform == job.platform,
+                    Purchase.platform_book_id == job.platform_book_id,
+                )
+            ).first()
+            book = db.get(Book, purchase.isbn) if purchase else None
+            if book is None or not book_metadata_is_incomplete(book):
+                continue
+            job.status = "pending"
+            job.attempts = 0
+            job.result = None
+            job.last_error_type = None
+            job.next_retry_at = None
+            job.updated_at = datetime.utcnow()
+            db.add(job)
+            retried += 1
+        db.commit()
+    return retried

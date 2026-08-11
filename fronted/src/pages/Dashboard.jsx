@@ -38,6 +38,10 @@ export default function Dashboard({ userId = 'user_01' }) {
   const [noticeMsg, setNoticeMsg] = useState(null);
   const [authRequiredPlatforms, setAuthRequiredPlatforms] = useState([]);
   const [syncingLibrary, setSyncingLibrary] = useState(false);
+  const [retryingMetadata, setRetryingMetadata] = useState(false);
+  const [metadataStatus, setMetadataStatus] = useState({
+    manual_review: 0,
+  });
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const requestSequence = useRef(0);
 
@@ -80,6 +84,15 @@ export default function Dashboard({ userId = 'user_01' }) {
     }
   }, [userId]);
 
+  const fetchMetadataStatus = useCallback(async () => {
+    try {
+      const data = await libraryService.getMetadataStatus(userId);
+      setMetadataStatus(data || { manual_review: 0 });
+    } catch (error) {
+      console.error('取得 metadata 狀態失敗:', error);
+    }
+  }, [userId]);
+
   useEffect(() => {
     fetchFilterOptions();
   }, [fetchFilterOptions]);
@@ -87,6 +100,10 @@ export default function Dashboard({ userId = 'user_01' }) {
   useEffect(() => {
     fetchBooks();
   }, [fetchBooks]);
+
+  useEffect(() => {
+    fetchMetadataStatus();
+  }, [fetchMetadataStatus]);
 
   const handleSearchSubmit = (e) => {
     e.preventDefault();
@@ -125,7 +142,11 @@ export default function Dashboard({ userId = 'user_01' }) {
     setAuthRequiredPlatforms([]);
     try {
       const result = await libraryService.importLibrary(userId);
-      await Promise.all([fetchFilterOptions(), fetchBooks()]);
+      await Promise.all([
+        fetchFilterOptions(),
+        fetchBooks(),
+        fetchMetadataStatus(),
+      ]);
       if (result?.status === 'auth_required') {
         setAuthRequiredPlatforms(result.needs_auth || []);
         setNoticeMsg(result.message);
@@ -154,6 +175,26 @@ export default function Dashboard({ userId = 'user_01' }) {
       );
     } finally {
       setSyncingLibrary(false);
+    }
+  };
+
+  const retryMetadata = async () => {
+    setRetryingMetadata(true);
+    setErrorMsg(null);
+    setNoticeMsg(null);
+    try {
+      const result = await libraryService.retryMetadata(userId);
+      setNoticeMsg(result?.message || '已重新排入缺少資料的書籍。');
+      await fetchMetadataStatus();
+    } catch (error) {
+      console.error('重試 metadata 失敗:', error);
+      setErrorMsg(
+        error.response?.data?.detail
+        || error.message
+        || '無法重新排入缺少資料的書籍。',
+      );
+    } finally {
+      setRetryingMetadata(false);
     }
   };
 
@@ -248,6 +289,22 @@ export default function Dashboard({ userId = 'user_01' }) {
               />
               {syncingLibrary ? '同步中…' : '同步書櫃'}
             </button>
+            {Number(metadataStatus.manual_review || 0) > 0 && (
+              <button
+                type="button"
+                onClick={retryMetadata}
+                className="library-sync-button"
+                disabled={retryingMetadata}
+              >
+                <RefreshCw
+                  className={retryingMetadata ? 'is-spinning' : ''}
+                  aria-hidden="true"
+                />
+                {retryingMetadata
+                  ? '重新排入中…'
+                  : `重試缺少資料 (${metadataStatus.manual_review})`}
+              </button>
+            )}
           </div>
 
           {noticeMsg && (

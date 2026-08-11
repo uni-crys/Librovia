@@ -18,6 +18,7 @@ from app.services.metadata_pipeline import close_metadata_client
 from app.services.library_import_queue import (
     metadata_queue_status,
     process_metadata_queue,
+    retry_incomplete_metadata_jobs,
 )
 from app.observability import (
     configure_logging,
@@ -204,6 +205,31 @@ async def import_library(
 @app.get("/library/metadata-status")
 def get_library_metadata_status(user_id: str):
     return metadata_queue_status(user_id)
+
+
+@app.post("/library/metadata-retry")
+async def retry_library_metadata(
+    user_id: str,
+    background_tasks: BackgroundTasks,
+    platform: str | None = None,
+    platform_book_id: str | None = None,
+):
+    retried = retry_incomplete_metadata_jobs(
+        user_id,
+        platform=platform,
+        platform_book_id=platform_book_id,
+    )
+    if retried:
+        background_tasks.add_task(process_metadata_queue)
+    return {
+        "status": "queued" if retried else "not_needed",
+        "retried": retried,
+        "message": (
+            f"已重新排入 {retried} 筆缺少資料的書籍"
+            if retried
+            else "目前沒有需要強制重試的書籍"
+        ),
+    }
 
 
 @app.get("/")

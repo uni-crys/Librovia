@@ -1516,6 +1516,23 @@ class LibraryImportResultTests(unittest.TestCase):
         self.assertEqual(result["needs_auth"], ["readmoo"])
         self.assertEqual(len(result["results"]), 2)
 
+    def test_manual_metadata_retry_queues_shared_processor(self):
+        from main import retry_library_metadata
+
+        background_tasks = BackgroundTasks()
+        with patch(
+            "main.retry_incomplete_metadata_jobs",
+            return_value=2,
+        ):
+            result = asyncio.run(retry_library_metadata(
+                user_id="reader",
+                background_tasks=background_tasks,
+            ))
+
+        self.assertEqual(result["status"], "queued")
+        self.assertEqual(result["retried"], 2)
+        self.assertEqual(len(background_tasks.tasks), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

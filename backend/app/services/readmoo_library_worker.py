@@ -624,18 +624,6 @@ async def import_readmoo_library_to_db(user_id: str, limit: int | None = None):
                     "[Readmoo Library Import] 官方書櫃 API metadata 合併完成，"
                     f"取得 {api_enriched_count}/{len(remote_books)} 筆"
                 )
-                incomplete_items = _readmoo_items_needing_metadata(
-                    user_id,
-                    remote_books,
-                )
-                enriched_count = await enrich_readmoo_public_metadata(
-                    browser,
-                    incomplete_items,
-                )
-                print(
-                    "[Readmoo Library Import] 公開商品頁 metadata 解析完成，"
-                    f"取得 {enriched_count}/{len(incomplete_items)} 筆"
-                )
                 state_file_path.parent.mkdir(parents=True, exist_ok=True)
                 await save_platform_storage_state(
                     context,
