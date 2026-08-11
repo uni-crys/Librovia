@@ -4,25 +4,28 @@ updates:
     directory: /backend
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 1
     groups:
-      python-minor-patch:
-        update-types:
-          - minor
-          - patch
+      python-dependencies:
+        patterns:
+          - "*"
 
   - package-ecosystem: npm
     directory: /fronted
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 1
     groups:
-      npm-minor-patch:
-        update-types:
-          - minor
-          - patch
+      frontend-dependencies:
+        patterns:
+          - "*"
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: monthly
+    open-pull-requests-limit: 1
+    groups:
+      github-actions:
+        patterns:
+          - "*"
