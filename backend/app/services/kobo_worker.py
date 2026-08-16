@@ -60,6 +60,49 @@ async def _wait_for_kobo_wishlist_state(
         await page.wait_for_timeout(500)
     return False
 
+
+def _find_kobo_wishlist_identity(
+    items: list[dict],
+    page_title: str | None,
+) -> tuple[str, str] | None:
+    """Resolve the current product to Kobo's stable wishlist ProductId."""
+
+    expected = _normalize_kobo_search_text(page_title)
+    if not expected:
+        return None
+    matches = []
+    for item in items:
+        product_id = str(item.get("ProductId") or "").strip()
+        title = str(item.get("Title") or "").strip()
+        if (
+            product_id
+            and title
+            and _normalize_kobo_search_text(title) == expected
+        ):
+            matches.append((product_id, title))
+    return matches[0] if len(matches) == 1 else None
+
+
+async def _read_current_kobo_wishlist_identity(page) -> tuple[str, str] | None:
+    """Read back the confirmed wishlist entry instead of trusting its title."""
+
+    try:
+        page_title = (
+            await page.locator("h1").locator("visible=true").first.inner_text()
+        ).strip()
+        items = await page.evaluate("""async () => {
+            const response = await fetch('/tw/zh/account/wishlist/fetch', {
+                headers: {'Accept': 'application/json, text/plain, */*'}
+            });
+            if (!response.ok) return [];
+            const payload = await response.json();
+            return Array.isArray(payload.Items) ? payload.Items : [];
+        }""")
+    except Exception:
+        return None
+    return _find_kobo_wishlist_identity(items or [], page_title)
+
+
 def get_user_state_path(user_id: str) -> Path:
     return BASE_DIR / "user_profiles" / user_id / "kobo" / "state.json"
 
@@ -179,7 +222,13 @@ async def _execute_kobo_wishlist_action(user_id: str, isbn: str, action: str):
                 if action == "add":
                     if is_already_in_wishlist:
                         print(f"[Kobo Worker] 該書籍原本就已在 Kobo 願望清單中。")
-                        _update_sync_status(user_id, isbn, "synced")
+                        identity = await _read_current_kobo_wishlist_identity(page)
+                        _update_sync_status(
+                            user_id,
+                            isbn,
+                            "synced",
+                            platform_book_id=identity[0] if identity else None,
+                        )
                     else:
                         print(f"[Kobo Worker] 執行點擊「新增至願望清單」...")
                         await wishlist_btn.click(force=True)
@@ -189,7 +238,13 @@ async def _execute_kobo_wishlist_action(user_id: str, isbn: str, action: str):
                             True,
                         ):
                             print(f"[Kobo Worker] 已確認新增至願望清單！")
-                            _update_sync_status(user_id, isbn, "synced")
+                            identity = await _read_current_kobo_wishlist_identity(page)
+                            _update_sync_status(
+                                user_id,
+                                isbn,
+                                "synced",
+                                platform_book_id=identity[0] if identity else None,
+                            )
                         else:
                             print("[Kobo Worker] 點擊後未確認願望清單狀態已更新")
                             _update_sync_status(user_id, isbn, "failed")
@@ -221,7 +276,14 @@ async def _execute_kobo_wishlist_action(user_id: str, isbn: str, action: str):
         finally:
             await browser.close()
 
-def _update_sync_status(user_id: str, isbn: str, status: str):
+
+def _update_sync_status(
+    user_id: str,
+    isbn: str,
+    status: str,
+    *,
+    platform_book_id: str | None = None,
+):
     try:
         with Session(engine) as db:
             statement = select(WishlistItem).where(
@@ -232,6 +294,8 @@ def _update_sync_status(user_id: str, isbn: str, status: str):
             item = db.exec(statement).first()
             if item:
                 item.sync_status = status
+                if platform_book_id:
+                    item.platform_book_id = platform_book_id
                 db.commit()
                 print(f"[Kobo Worker] 資料庫狀態已更新為: {status}")
     except Exception as e:

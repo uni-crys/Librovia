@@ -264,7 +264,7 @@ class WishlistApiTests(unittest.TestCase):
         self.assertEqual(result["owned_filtered"], 1)
         self.assertEqual(items, [])
 
-    def test_remote_wishlist_merges_distinctive_subtitle_across_platforms(self):
+    def test_remote_wishlist_does_not_merge_colon_subtitle_by_title_alone(self):
         with Session(self.engine) as session:
             session.add(Book(
                 isbn="readmoo-product",
@@ -293,19 +293,18 @@ class WishlistApiTests(unittest.TestCase):
             items = session.exec(select(WishlistItem)).all()
             books = session.exec(select(Book)).all()
 
-        self.assertEqual({item.isbn for item in items}, {"readmoo-product"})
+        self.assertEqual(
+            {item.isbn for item in items},
+            {"readmoo-product", "kobo-product"},
+        )
         self.assertEqual(
             {
                 (item.platform, item.platform_book_id)
                 for item in items
             },
-            {
-                ("readmoo", "readmoo-product"),
-                ("kobo", "kobo-product"),
-            },
+            {("readmoo", "readmoo-product"), ("kobo", "kobo-product")},
         )
-        self.assertEqual(len(books), 1)
-        self.assertIn("一個由血", books[0].title)
+        self.assertEqual(len(books), 2)
 
     def test_remote_wishlist_merges_series_title_and_preserves_metadata(self):
         with Session(self.engine) as session:
@@ -487,6 +486,83 @@ class WishlistApiTests(unittest.TestCase):
         self.assertEqual(
             {item.isbn for item in items},
             {"short-product", "different-product"},
+        )
+
+    def test_four_character_chinese_title_merges_subtitle_variant(self):
+        with Session(self.engine) as session:
+            session.add(Book(
+                isbn="9786263909960",
+                title="長日將盡",
+                author="石黑一雄",
+            ))
+            session.add(WishlistItem(
+                user_id="reader",
+                platform="readmoo",
+                platform_book_id="readmoo-product",
+                isbn="9786263909960",
+                sync_status="synced",
+            ))
+            session.commit()
+
+            upsert_remote_wishlist_books(
+                session,
+                user_id="reader",
+                platform="kobo",
+                remote_books=[{
+                    "isbn": "kobo-product",
+                    "title": "長日將盡（諾貝爾文學獎得主石黑一雄）",
+                }],
+            )
+            session.commit()
+            items = session.exec(select(WishlistItem)).all()
+
+        self.assertEqual({item.isbn for item in items}, {"9786263909960"})
+        self.assertEqual(len(items), 2)
+
+    def test_parenthetical_volume_is_not_merged(self):
+        with Session(self.engine) as session:
+            session.add(Book(isbn="novel", title="漫長旅程"))
+            session.add(WishlistItem(
+                user_id="reader",
+                platform="readmoo",
+                platform_book_id="novel",
+                isbn="novel",
+                sync_status="synced",
+            ))
+            session.commit()
+
+            upsert_remote_wishlist_books(
+                session,
+                user_id="reader",
+                platform="kobo",
+                remote_books=[{
+                    "isbn": "novel-volume-two",
+                    "title": "漫長旅程（第2集）",
+                }],
+            )
+            session.commit()
+            items = session.exec(select(WishlistItem)).all()
+
+        self.assertEqual(
+            {item.isbn for item in items},
+            {"novel", "novel-volume-two"},
+        )
+
+    def test_kobo_wishlist_identity_uses_exact_remote_title(self):
+        identity = kobo_worker._find_kobo_wishlist_identity(
+            [
+                {"ProductId": "other", "Title": "被埋葬的記憶"},
+                {
+                    "ProductId": "kobo-product-uuid",
+                    "Title": "被掩埋的巨人（精裝珍藏版）",
+                },
+            ],
+            "被掩埋的巨人（精裝珍藏版）",
+        )
+
+        self.assertEqual(
+            identity,
+            ("kobo-product-uuid", "被掩埋的巨人（精裝珍藏版）"),
         )
 
     def test_missing_remote_ids_get_distinct_stable_keys(self):

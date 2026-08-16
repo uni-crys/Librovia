@@ -34,7 +34,7 @@ def _title_identity_variants(value: str | None) -> set[str]:
 
 
 def _titles_are_same_book(left: str | None, right: str | None) -> bool:
-    """Match exact titles or a distinctive title followed by a subtitle."""
+    """Match exact titles or a distinctive title plus parenthetical notes."""
 
     left_text = (left or "").strip()
     right_text = (right or "").strip()
@@ -49,12 +49,39 @@ def _titles_are_same_book(left: str | None, right: str | None) -> bool:
         (left_text, right_text),
         key=lambda value: len(_normalized_title(value)),
     )
-    if len(_normalized_title(shorter)) < 5:
-        return False
-    return any(
-        longer.startswith(f"{shorter}{separator}")
-        for separator in ("：", ":", "（", "(", " ")
+    shorter_normalized = _normalized_title(shorter)
+    # Four-character Chinese titles such as ``長日將盡`` are already
+    # distinctive enough when the longer title starts with the exact main
+    # title plus an explicit subtitle separator.  Keep the old five-character
+    # floor for other scripts so generic one-word titles such as ``鯨`` do not
+    # collapse into unrelated books.
+    is_four_character_cjk_title = bool(
+        len(shorter_normalized) == 4
+        and re.fullmatch(r"[\u3400-\u4dbf\u4e00-\u9fff]{4}", shorter_normalized)
     )
+    if len(shorter_normalized) < 5 and not is_four_character_cjk_title:
+        return False
+    suffix = next(
+        (
+            longer[len(shorter) + 1:]
+            for opening in ("（", "(")
+            if longer.startswith(f"{shorter}{opening}")
+        ),
+        None,
+    )
+    if suffix is None:
+        return False
+
+    # Parentheses usually contain edition or marketing notes, but they can
+    # also carry a real volume distinction.  Never collapse those by title.
+    volume_marker = re.compile(
+        r"(?:"
+        r"第?[0-9０-９一二三四五六七八九十百]+[集卷冊部篇季]"
+        r"|[上中下](?:冊|卷|集|部)?"
+        r"|外傳|前傳|續集|續篇|完結篇"
+        r")"
+    )
+    return volume_marker.search(suffix) is None
 
 
 def _owned_title_matches(left: str | None, right: str | None) -> bool:
