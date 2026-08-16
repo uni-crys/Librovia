@@ -3,6 +3,7 @@ import asyncio
 import os
 import urllib.parse
 import json
+import re
 from pathlib import Path
 from playwright.async_api import Error as PlaywrightError, async_playwright
 from sqlmodel import Session, select
@@ -19,6 +20,14 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 # 透過環境變數控制，預設開啟隱藏模式
 IS_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "True").lower() == "true"
 KOBO_HUMAN_VERIFICATION_TIMEOUT_MS = 180000
+KOBO_SEARCH_RESULT_SELECTOR = (
+    ".item-detail a[href*='/ebook/'], "
+    "article a[href*='/ebook/'], "
+    "li a[href*='/ebook/'], "
+    "a.title[href*='/ebook/'], "
+    "h2 a[href*='/ebook/'], "
+    "a[href*='/ebook/']"
+)
 
 def get_user_state_path(user_id: str) -> Path:
     return BASE_DIR / "user_profiles" / user_id / "kobo" / "state.json"
@@ -63,7 +72,9 @@ async def _execute_kobo_wishlist_action(user_id: str, isbn: str, action: str):
 
             # 1. 進入首頁檢查是否過期
             await page.goto("https://www.kobo.com/tw/zh", wait_until="domcontentloaded", timeout=20000)
-            await page.wait_for_timeout(2000)
+            if not await _wait_for_kobo_human_verification(page):
+                _update_sync_status(user_id, isbn, "failed")
+                return
 
             if "/signin" in page.url or await page.locator("a:has-text('登入')").locator("visible=true").count() > 0:
                 print("[Kobo Worker] 偵測到憑證已過期！")
@@ -81,28 +92,34 @@ async def _execute_kobo_wishlist_action(user_id: str, isbn: str, action: str):
                         db.commit()
                 return
 
-            search_url = f"https://www.kobo.com/tw/zh/search?query={isbn}"
+            search_url = (
+                "https://www.kobo.com/tw/zh/search?query="
+                f"{urllib.parse.quote(isbn)}"
+            )
             print(f"[Kobo Worker] 進入搜尋頁面...")
             await page.goto(search_url, wait_until="domcontentloaded", timeout=20000)
-            await page.wait_for_timeout(3000)
 
             if "/ebook/" not in page.url:
                 print(f"[Kobo Worker] 停留在搜尋列表，尋找書籍連結...")
-                book_link = page.locator(".item-detail .title, a.title, h1.title a").first
+                book_link = await _find_kobo_search_result(page)
                 
-                if await book_link.count() == 0 and book_title:
+                if book_link is None and book_title:
                     print(f"[Kobo Worker] ISBN 無結果，改用書名搜尋...")
                     search_url = f"https://www.kobo.com/tw/zh/search?query={urllib.parse.quote(book_title)}"
                     await page.goto(search_url, wait_until="domcontentloaded", timeout=20000)
-                    await page.wait_for_timeout(3000)
-                    book_link = page.locator(".item-detail .title, a.title, h1.title a").first
+                    book_link = await _find_kobo_search_result(
+                        page,
+                        book_title,
+                    )
                 
                 if "/ebook/" not in page.url:
-                    if await book_link.count() > 0:
+                    if book_link is not None:
                         print(f"[Kobo Worker] 找到搜尋列表中的書籍，點擊進入內頁...")
                         await book_link.click(force=True)
                         await page.wait_for_load_state("domcontentloaded")
-                        await page.wait_for_timeout(2000)
+                        if not await _wait_for_kobo_human_verification(page):
+                            _update_sync_status(user_id, isbn, "failed")
+                            return
                     else:
                         print(f"[Kobo Worker] 在 Kobo 平台上找不到目標書籍")
                         _update_sync_status(user_id, isbn, "failed")
@@ -242,6 +259,47 @@ async def _wait_for_kobo_human_verification(page) -> bool:
             return True
     print("[Kobo Import] 等待圖靈驗證逾時")
     return False
+
+
+def _normalize_kobo_search_text(value: str | None) -> str:
+    return re.sub(r"[\W_]+", "", str(value or "").casefold())
+
+
+async def _find_kobo_search_result(page, book_title: str | None = None):
+    """Wait for Kobo's client-rendered search cards and return a product link."""
+    if not await _wait_for_kobo_human_verification(page):
+        return None
+    try:
+        await page.wait_for_selector(
+            KOBO_SEARCH_RESULT_SELECTOR,
+            state="attached",
+            timeout=20000,
+        )
+    except Exception:
+        return None
+
+    links = page.locator(KOBO_SEARCH_RESULT_SELECTOR)
+    count = await links.count()
+    if count == 0:
+        return None
+    if not book_title:
+        return links.nth(0)
+
+    expected = _normalize_kobo_search_text(book_title)
+    for index in range(count):
+        link = links.nth(index)
+        card_text = await link.evaluate("""el => {
+            const card = el.closest('li, article, .item-detail, .book-item');
+            return [
+                card?.innerText || '',
+                el.innerText || '',
+                el.getAttribute('title') || '',
+                el.getAttribute('aria-label') || ''
+            ].join(' ');
+        }""")
+        if expected and expected in _normalize_kobo_search_text(card_text):
+            return link
+    return links.nth(0)
 
 
 async def import_kobo_wishlist_to_db(user_id: str) -> dict:

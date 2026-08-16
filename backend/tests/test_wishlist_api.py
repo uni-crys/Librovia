@@ -1141,6 +1141,35 @@ class PlatformStatusTests(unittest.TestCase):
         self.assertTrue(completed)
         self.assertEqual(page.wait_for_timeout.await_count, 2)
 
+    def test_kobo_search_waits_for_client_rendered_product_link(self):
+        link = unittest.mock.Mock()
+        link.evaluate = AsyncMock(return_value=(
+            "克拉拉與太陽（諾貝爾文學獎得主石黑一雄）"
+        ))
+        links = unittest.mock.Mock()
+        links.count = AsyncMock(return_value=1)
+        links.nth.return_value = link
+        page = unittest.mock.Mock()
+        page.wait_for_selector = AsyncMock()
+        page.locator.return_value = links
+
+        with patch.object(
+            kobo_worker,
+            "_wait_for_kobo_human_verification",
+            AsyncMock(return_value=True),
+        ):
+            result = asyncio.run(kobo_worker._find_kobo_search_result(
+                page,
+                "克拉拉與太陽",
+            ))
+
+        self.assertIs(result, link)
+        page.wait_for_selector.assert_awaited_once_with(
+            kobo_worker.KOBO_SEARCH_RESULT_SELECTOR,
+            state="attached",
+            timeout=20000,
+        )
+
     def test_missing_state_requires_update(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             with patch.object(auth, "BASE_DIR", Path(temporary_directory)):

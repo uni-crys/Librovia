@@ -25,6 +25,7 @@ from app.services.library_navigation import (
     wait_for_stable_route,
 )
 from app.services.wishlist_reconciliation import deduplicate_remote_books
+from app.services.kobo_worker import _wait_for_kobo_human_verification
 from app.services.platform_auth import (
     get_platform_auth_cookies,
     get_platform_state_path,
@@ -613,6 +614,14 @@ async def import_kobo_library_to_db(
                 wait_until="domcontentloaded",
                 timeout=40000,
             )
+            if not await _wait_for_kobo_human_verification(page):
+                set_platform_session_status(user_id, "kobo", "blocked")
+                return {
+                    "platform": "kobo",
+                    "status": "blocked",
+                    "message": "Kobo 人機驗證等待逾時，已停止書櫃同步",
+                    "new_books": 0,
+                }
             home_status = await wait_for_stable_route(page, is_kobo_home_url)
             if home_status == "blocked":
                 set_platform_session_status(user_id, "kobo", "blocked")
@@ -662,6 +671,14 @@ async def import_kobo_library_to_db(
                 wait_until="domcontentloaded",
                 timeout=40000,
             )
+            if not await _wait_for_kobo_human_verification(page):
+                set_platform_session_status(user_id, "kobo", "blocked")
+                return {
+                    "platform": "kobo",
+                    "status": "blocked",
+                    "message": "Kobo 書櫃人機驗證等待逾時",
+                    "new_books": 0,
+                }
             library_status = await wait_for_stable_route(
                 page,
                 is_kobo_library_url,
@@ -686,6 +703,15 @@ async def import_kobo_library_to_db(
             page_num = 1
             while True:
                 print(f"[Kobo Library Import] 正在爬取第 {page_num} 頁...")
+
+                if not await _wait_for_kobo_human_verification(page):
+                    set_platform_session_status(user_id, "kobo", "blocked")
+                    return {
+                        "platform": "kobo",
+                        "status": "blocked",
+                        "message": "Kobo 書櫃人機驗證等待逾時",
+                        "new_books": 0,
+                    }
                 
                 await _require_kobo_library_items(page, page_num)
 

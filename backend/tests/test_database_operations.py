@@ -17,6 +17,7 @@ from app.database_admin import create_backup, restore_backup, verify_sqlite
 from app.models import Book, MetadataJob, Purchase
 from app.services import library_import_queue
 from app.services.library_import_queue import (
+    metadata_queue_status,
     process_metadata_queue,
     retry_incomplete_metadata_jobs,
     stage_library_snapshot,
@@ -508,6 +509,61 @@ class MetadataQueueTests(unittest.TestCase):
         self.assertEqual(job.status, "pending")
         self.assertEqual(job.attempts, 0)
         self.assertIsNone(job.last_error_type)
+
+    def test_metadata_status_excludes_completed_stale_manual_reviews(self):
+        with Session(self.engine) as db:
+            db.add_all([
+                Book(
+                    isbn="complete-book",
+                    title="資料完整",
+                    author="作者",
+                    cover_url="https://example.test/complete.jpg",
+                    category="人文社科",
+                ),
+                Book(
+                    isbn="incomplete-book",
+                    title="仍缺封面",
+                    author="作者",
+                    category="人文社科",
+                ),
+                Purchase(
+                    user_id="reader",
+                    platform="readmoo",
+                    platform_book_id="complete-platform-id",
+                    isbn="complete-book",
+                ),
+                Purchase(
+                    user_id="reader",
+                    platform="readmoo",
+                    platform_book_id="incomplete-platform-id",
+                    isbn="incomplete-book",
+                ),
+                MetadataJob(
+                    user_id="reader",
+                    platform="readmoo",
+                    platform_book_id="complete-platform-id",
+                    raw_identifier="complete-book",
+                    raw_title="資料完整",
+                    status="manual_review",
+                    attempts=3,
+                ),
+                MetadataJob(
+                    user_id="reader",
+                    platform="readmoo",
+                    platform_book_id="incomplete-platform-id",
+                    raw_identifier="incomplete-book",
+                    raw_title="仍缺封面",
+                    status="manual_review",
+                    attempts=3,
+                ),
+            ])
+            db.commit()
+
+        with patch.object(library_import_queue, "engine", self.engine):
+            status = metadata_queue_status("reader")
+
+        self.assertEqual(status["manual_review"], 1)
+        self.assertEqual(status["completed"], 1)
 
 
 if __name__ == "__main__":

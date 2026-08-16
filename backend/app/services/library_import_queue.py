@@ -545,17 +545,38 @@ def metadata_queue_status(user_id: str) -> dict[str, int]:
         jobs = db.exec(
             select(MetadataJob).where(MetadataJob.user_id == user_id)
         ).all()
-    counts = {
-        "pending": 0,
-        "running": 0,
-        "completed": 0,
-        "failed": 0,
-        "manual_review": 0,
-    }
-    for job in jobs:
-        counts[job.status] = counts.get(job.status, 0) + 1
-    counts["total"] = len(jobs)
-    return counts
+        counts = {
+            "pending": 0,
+            "running": 0,
+            "completed": 0,
+            "failed": 0,
+            "manual_review": 0,
+        }
+        for job in jobs:
+            status = job.status
+            if status == "manual_review" and not _metadata_job_needs_retry(
+                db,
+                job,
+            ):
+                # Another platform or a later snapshot may already have filled
+                # the book. Treat that stale review as complete in status
+                # output so the UI and retry endpoint use the same predicate.
+                status = "completed"
+            counts[status] = counts.get(status, 0) + 1
+        counts["total"] = len(jobs)
+        return counts
+
+
+def _metadata_job_needs_retry(db: Session, job: MetadataJob) -> bool:
+    purchase = db.exec(
+        select(Purchase).where(
+            Purchase.user_id == job.user_id,
+            Purchase.platform == job.platform,
+            Purchase.platform_book_id == job.platform_book_id,
+        )
+    ).first()
+    book = db.get(Book, purchase.isbn) if purchase else None
+    return bool(book is not None and book_metadata_is_incomplete(book))
 
 
 def retry_incomplete_metadata_jobs(
@@ -576,15 +597,7 @@ def retry_incomplete_metadata_jobs(
                 continue
             if platform_book_id and job.platform_book_id != platform_book_id:
                 continue
-            purchase = db.exec(
-                select(Purchase).where(
-                    Purchase.user_id == job.user_id,
-                    Purchase.platform == job.platform,
-                    Purchase.platform_book_id == job.platform_book_id,
-                )
-            ).first()
-            book = db.get(Book, purchase.isbn) if purchase else None
-            if book is None or not book_metadata_is_incomplete(book):
+            if not _metadata_job_needs_retry(db, job):
                 continue
             job.status = "pending"
             job.attempts = 0
