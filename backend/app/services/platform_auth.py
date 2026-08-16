@@ -25,6 +25,10 @@ READMOO_BROWSER_PROXY = os.getenv(
     "READMOO_BROWSER_PROXY",
     "",
 ).strip()
+KOBO_BROWSER_PROXY = os.getenv(
+    "KOBO_BROWSER_PROXY",
+    "",
+).strip()
 _SAFE_USER_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
@@ -46,6 +50,22 @@ async def launch_readmoo_browser(playwright, *, headless: bool):
         launch_options["channel"] = READMOO_BROWSER_CHANNEL
     if READMOO_BROWSER_PROXY:
         launch_options["proxy"] = {"server": READMOO_BROWSER_PROXY}
+    return await playwright.chromium.launch(**launch_options)
+
+
+async def launch_kobo_browser(
+    playwright,
+    *,
+    headless: bool,
+    args: list[str] | None = None,
+):
+    """Launch every Kobo flow through the same configured network path."""
+    launch_options = dict(
+        headless=headless,
+        args=args or ["--disable-blink-features=AutomationControlled"],
+    )
+    if KOBO_BROWSER_PROXY:
+        launch_options["proxy"] = {"server": KOBO_BROWSER_PROXY}
     return await playwright.chromium.launch(**launch_options)
 
 
@@ -369,7 +389,11 @@ async def login_and_save_platform_state(
     )
 
     async with async_playwright() as playwright:
-        browser = await launch_readmoo_browser(playwright, headless=False)
+        browser = await (
+            launch_readmoo_browser(playwright, headless=False)
+            if platform == "readmoo"
+            else launch_kobo_browser(playwright, headless=False)
+        )
         context = await browser.new_context(
             viewport={"width": 1280, "height": 800},
         )

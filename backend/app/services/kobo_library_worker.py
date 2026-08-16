@@ -29,6 +29,7 @@ from app.services.kobo_worker import _wait_for_kobo_human_verification
 from app.services.platform_auth import (
     get_platform_auth_cookies,
     get_platform_state_path,
+    launch_kobo_browser,
     save_platform_storage_state,
     set_platform_session_status,
 )
@@ -582,9 +583,9 @@ async def import_kobo_library_to_db(
         }
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
+        browser = await launch_kobo_browser(
+            p,
             headless=IS_HEADLESS,
-            args=["--disable-blink-features=AutomationControlled"]
         )
         context = await browser.new_context(
             storage_state=str(state_file_path),

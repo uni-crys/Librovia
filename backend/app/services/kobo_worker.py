@@ -9,7 +9,10 @@ from playwright.async_api import Error as PlaywrightError, async_playwright
 from sqlmodel import Session, select
 from app.database import engine
 from app.models import WishlistItem, Book, PlatformSession
-from app.services.platform_auth import set_platform_session_status
+from app.services.platform_auth import (
+    launch_kobo_browser,
+    set_platform_session_status,
+)
 from app.services.wishlist_reconciliation import (
     deduplicate_remote_books,
     upsert_remote_wishlist_books,
@@ -76,7 +79,8 @@ async def _execute_kobo_wishlist_action(user_id: str, isbn: str, action: str):
             book_title = book.title
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
+        browser = await launch_kobo_browser(
+            p,
             headless=IS_HEADLESS,
             args=[
                 "--disable-blink-features=AutomationControlled",
@@ -375,9 +379,9 @@ async def import_kobo_wishlist_to_db(user_id: str) -> dict:
         }
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
+        browser = await launch_kobo_browser(
+            p,
             headless=IS_HEADLESS,
-            args=["--disable-blink-features=AutomationControlled"]
         )
         context = await browser.new_context(
             storage_state=str(state_file_path),

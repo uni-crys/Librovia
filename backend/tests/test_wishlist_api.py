@@ -1648,6 +1648,28 @@ class PlatformStatusTests(unittest.TestCase):
             proxy={"server": "socks5://readmoo-vpn:1080"},
         )
 
+    def test_kobo_browser_uses_configured_home_proxy(self):
+        chromium = unittest.mock.Mock()
+        chromium.launch = AsyncMock(return_value="browser")
+        playwright = unittest.mock.Mock(chromium=chromium)
+
+        with patch.object(
+            platform_auth,
+            "KOBO_BROWSER_PROXY",
+            "socks5://readmoo-vpn:1080",
+        ):
+            browser = asyncio.run(platform_auth.launch_kobo_browser(
+                playwright,
+                headless=True,
+            ))
+
+        self.assertEqual(browser, "browser")
+        chromium.launch.assert_awaited_once_with(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"],
+            proxy={"server": "socks5://readmoo-vpn:1080"},
+        )
+
     def test_login_endpoint_returns_403_when_readmoo_is_waf_blocked(self):
         with patch.object(
             auth,
