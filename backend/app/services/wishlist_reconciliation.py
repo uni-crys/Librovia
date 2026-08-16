@@ -215,7 +215,7 @@ def upsert_remote_wishlist_books(
                 for book in owned_books.values()
             )
         )
-        existing_item = next(
+        remote_identity_item = next(
             (
                 item
                 for item in wishlist_items
@@ -224,6 +224,28 @@ def upsert_remote_wishlist_books(
             ),
             None,
         )
+        # A locally-created row starts with the canonical ISBN and no platform
+        # product ID.  When a later platform snapshot returns a UUID/product
+        # ID for that same title, reuse the local row instead of creating a
+        # second card for the same platform.
+        title_matched_item = next(
+            (
+                item
+                for item in wishlist_items
+                if item.platform == platform
+                and item is not remote_identity_item
+                and not item.platform_book_id
+                and _titles_are_same_book(
+                    (db.get(Book, item.isbn) or Book(
+                        isbn=item.isbn,
+                        title="",
+                    )).title,
+                    title,
+                )
+            ),
+            None,
+        )
+        existing_item = title_matched_item or remote_identity_item
         if owned_match:
             if existing_item is not None:
                 db.delete(existing_item)
@@ -247,8 +269,12 @@ def upsert_remote_wishlist_books(
             None,
         )
         canonical_isbn = (
-            equivalent_item.isbn
+            title_matched_item.isbn
+            if title_matched_item is not None
+            else equivalent_item.isbn
             if equivalent_item is not None
+            else remote_identity_item.isbn
+            if remote_identity_item is not None
             else platform_book_id
         )
         book = db.get(Book, canonical_isbn)
@@ -276,13 +302,31 @@ def upsert_remote_wishlist_books(
             for item in wishlist_items
             if item is not existing_item
             and item.platform == platform
-            and item.isbn == canonical_isbn
+            and (
+                item.isbn == canonical_isbn
+                or (item.platform_book_id or item.isbn) == platform_book_id
+            )
         ]
         for duplicate in duplicate_items:
+            duplicate_book = db.get(Book, duplicate.isbn)
+            _merge_missing_book_metadata(book, duplicate_book)
             db.delete(duplicate)
             wishlist_items.remove(duplicate)
         if duplicate_items:
             db.flush()
+            for duplicate in duplicate_items:
+                if duplicate.isbn == canonical_isbn:
+                    continue
+                still_used = any(
+                    item.isbn == duplicate.isbn
+                    for item in wishlist_items
+                ) or any(
+                    purchase.isbn == duplicate.isbn
+                    for purchase in purchases
+                )
+                duplicate_book = db.get(Book, duplicate.isbn)
+                if duplicate_book is not None and not still_used:
+                    db.delete(duplicate_book)
 
         if existing_item is None:
             existing_item = WishlistItem(

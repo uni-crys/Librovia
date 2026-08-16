@@ -11,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.api import auth, readmoo_replication
-from app.services import kobo_worker, platform_auth
+from app.services import kobo_worker, platform_auth, readmoo_worker
 from app.services.kobo_library_worker import (
     KoboLibrarySnapshotIncomplete,
     _require_kobo_library_items,
@@ -399,6 +399,62 @@ class WishlistApiTests(unittest.TestCase):
         self.assertEqual(len(kobo_items), 1)
         self.assertEqual(kobo_items[0].isbn, "9786267952047")
         self.assertEqual(kobo_items[0].platform_book_id, "kobo-product-uuid")
+
+    def test_remote_wishlist_merges_same_platform_uuid_into_local_isbn(self):
+        with Session(self.engine) as session:
+            session.add_all([
+                Book(
+                    isbn="9786263909991",
+                    title="克拉拉與太陽",
+                    author="石黑一雄",
+                    category="語言文學",
+                ),
+                WishlistItem(
+                    user_id="reader",
+                    platform="kobo",
+                    isbn="9786263909991",
+                    sync_status="failed",
+                ),
+                Book(
+                    isbn="kobo-product-uuid",
+                    title="克拉拉與太陽（諾貝爾文學獎得主石黑一雄）",
+                    cover_url="https://example.test/klara.jpg",
+                    category="Unkown",
+                ),
+                WishlistItem(
+                    user_id="reader",
+                    platform="kobo",
+                    platform_book_id="kobo-product-uuid",
+                    isbn="kobo-product-uuid",
+                    sync_status="synced",
+                ),
+            ])
+            session.commit()
+
+            upsert_remote_wishlist_books(
+                session,
+                user_id="reader",
+                platform="kobo",
+                remote_books=[{
+                    "isbn": "kobo-product-uuid",
+                    "title": "克拉拉與太陽（諾貝爾文學獎得主石黑一雄）",
+                }],
+            )
+            session.commit()
+            items = session.exec(select(WishlistItem)).all()
+            books = session.exec(select(Book)).all()
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].isbn, "9786263909991")
+        self.assertEqual(items[0].platform_book_id, "kobo-product-uuid")
+        self.assertEqual(items[0].sync_status, "synced")
+        self.assertEqual(len(books), 1)
+        self.assertEqual(books[0].author, "石黑一雄")
+        self.assertEqual(books[0].category, "語言文學")
+        self.assertEqual(
+            books[0].cover_url,
+            "https://example.test/klara.jpg",
+        )
 
     def test_short_generic_title_is_not_merged_by_prefix(self):
         with Session(self.engine) as session:
@@ -1105,6 +1161,27 @@ class WishlistApiTests(unittest.TestCase):
 
 
 class PlatformStatusTests(unittest.TestCase):
+    def test_readmoo_waits_until_wishlist_state_really_changes(self):
+        page = unittest.mock.Mock()
+        page.wait_for_timeout = AsyncMock()
+        button = unittest.mock.Mock()
+        with patch.object(
+            readmoo_worker,
+            "_readmoo_wishlist_button_active",
+            AsyncMock(side_effect=[False, False, True]),
+        ):
+            changed = asyncio.run(
+                readmoo_worker._wait_for_readmoo_wishlist_state(
+                    page,
+                    button,
+                    True,
+                    attempts=3,
+                )
+            )
+
+        self.assertTrue(changed)
+        self.assertEqual(page.wait_for_timeout.await_count, 2)
+
     def test_kobo_detects_cloudflare_human_verification(self):
         class FakeLocator:
             async def inner_text(self):

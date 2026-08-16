@@ -26,6 +26,29 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 # for an explicit local diagnostic.
 IS_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "False").lower() == "true"
 
+
+async def _readmoo_wishlist_button_active(wishlist_btn) -> bool:
+    return bool(await wishlist_btn.evaluate("""el => (
+        el.classList.contains('active') ||
+        el.classList.contains('mo-heart-fill') ||
+        el.getAttribute('aria-pressed') === 'true' ||
+        Boolean(el.querySelector('.mo-heart-fill'))
+    )"""))
+
+
+async def _wait_for_readmoo_wishlist_state(
+    page,
+    wishlist_btn,
+    expected_active: bool,
+    attempts: int = 20,
+) -> bool:
+    """Confirm the storefront actually persisted the requested heart state."""
+    for _ in range(attempts):
+        if await _readmoo_wishlist_button_active(wishlist_btn) == expected_active:
+            return True
+        await page.wait_for_timeout(500)
+    return False
+
 def get_user_state_path(user_id: str) -> Path:
     return BASE_DIR / "user_profiles" / user_id / "readmoo" / "state.json"
 
@@ -145,8 +168,9 @@ async def _execute_readmoo_wishlist_action(user_id: str, isbn: str, action: str)
                     print(f"[Readmoo Worker] 找到待購清單按鈕，準備判斷是否已在清單中...")
                     await page.wait_for_timeout(2500)
 
-                    btn_html = await wishlist_btn.evaluate("el => el.outerHTML")
-                    is_already_in_wishlist = "active" in btn_html or "mo-heart-fill" in btn_html
+                    is_already_in_wishlist = (
+                        await _readmoo_wishlist_button_active(wishlist_btn)
+                    )
 
                     if action == "add":
                         if is_already_in_wishlist:
@@ -155,17 +179,31 @@ async def _execute_readmoo_wishlist_action(user_id: str, isbn: str, action: str)
                         else:
                             print(f"[Readmoo Worker] 執行點擊「加入待購清單」...")
                             await wishlist_btn.click(force=True)
-                            await page.wait_for_timeout(3000)
-                            print(f"[Readmoo Worker] 成功加入待購清單。")
-                            _update_sync_status(user_id, isbn, "synced")
+                            if await _wait_for_readmoo_wishlist_state(
+                                page,
+                                wishlist_btn,
+                                True,
+                            ):
+                                print(f"[Readmoo Worker] 成功加入待購清單。")
+                                _update_sync_status(user_id, isbn, "synced")
+                            else:
+                                print("[Readmoo Worker] 點擊後未確認待購狀態已更新")
+                                _update_sync_status(user_id, isbn, "failed")
                             
                     elif action == "remove":
                         if is_already_in_wishlist:
                             print(f"[Readmoo Worker] 執行再次點擊以「移除待購清單」...")
                             await wishlist_btn.click(force=True)
-                            await page.wait_for_timeout(3000)
-                            print(f"[Readmoo Worker] 成功移除待購清單。")
-                            _update_sync_status(user_id, isbn, "removed")
+                            if await _wait_for_readmoo_wishlist_state(
+                                page,
+                                wishlist_btn,
+                                False,
+                            ):
+                                print(f"[Readmoo Worker] 成功移除待購清單。")
+                                _update_sync_status(user_id, isbn, "removed")
+                            else:
+                                print("[Readmoo Worker] 點擊後未確認待購狀態已移除")
+                                _update_sync_status(user_id, isbn, "failed")
                         else:
                             print(f"[Readmoo Worker] 該書籍原本就不在待購清單中，無須移除。")
                             _update_sync_status(user_id, isbn, "removed")
