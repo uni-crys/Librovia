@@ -114,9 +114,11 @@ async def _execute_kobo_wishlist_action(user_id: str, isbn: str, action: str):
                 
                 if "/ebook/" not in page.url:
                     if book_link is not None:
-                        print(f"[Kobo Worker] 找到搜尋列表中的書籍，點擊進入內頁...")
-                        await book_link.click(force=True)
-                        await page.wait_for_load_state("domcontentloaded")
+                        print(f"[Kobo Worker] 找到搜尋列表中的書籍，進入商品內頁...")
+                        if not await _open_kobo_search_result(page, book_link):
+                            print("[Kobo Worker] 搜尋結果缺少可用的商品網址")
+                            _update_sync_status(user_id, isbn, "failed")
+                            return
                         if not await _wait_for_kobo_human_verification(page):
                             _update_sync_status(user_id, isbn, "failed")
                             return
@@ -300,6 +302,20 @@ async def _find_kobo_search_result(page, book_title: str | None = None):
         if expected and expected in _normalize_kobo_search_text(card_text):
             return link
     return links.nth(0)
+
+
+async def _open_kobo_search_result(page, book_link) -> bool:
+    """Navigate by href so hidden duplicate result links cannot break clicks."""
+    href = await book_link.get_attribute("href")
+    if not href:
+        return False
+    product_url = urllib.parse.urljoin(page.url, href)
+    await page.goto(
+        product_url,
+        wait_until="domcontentloaded",
+        timeout=40000,
+    )
+    return True
 
 
 async def import_kobo_wishlist_to_db(user_id: str) -> dict:

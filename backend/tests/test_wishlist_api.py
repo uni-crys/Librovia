@@ -1170,6 +1170,26 @@ class PlatformStatusTests(unittest.TestCase):
             timeout=20000,
         )
 
+    def test_kobo_search_result_opens_href_without_clicking_hidden_link(self):
+        link = unittest.mock.Mock()
+        link.get_attribute = AsyncMock(return_value=(
+            "/tw/zh/ebook/never-let-me-go"
+        ))
+        link.click = AsyncMock()
+        page = unittest.mock.Mock()
+        page.url = "https://www.kobo.com/tw/zh/search?query=book"
+        page.goto = AsyncMock()
+
+        opened = asyncio.run(kobo_worker._open_kobo_search_result(page, link))
+
+        self.assertTrue(opened)
+        page.goto.assert_awaited_once_with(
+            "https://www.kobo.com/tw/zh/ebook/never-let-me-go",
+            wait_until="domcontentloaded",
+            timeout=40000,
+        )
+        link.click.assert_not_awaited()
+
     def test_missing_state_requires_update(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             with patch.object(auth, "BASE_DIR", Path(temporary_directory)):
