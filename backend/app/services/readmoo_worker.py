@@ -212,7 +212,7 @@ async def _execute_readmoo_wishlist_action(user_id: str, isbn: str, action: str)
                     _update_sync_status(user_id, isbn, "failed")
             else:
                 print(f"[Readmoo Worker] 在 Readmoo 平台上找不到目標書籍")
-                _update_sync_status(user_id, isbn, "failed")
+                _update_sync_status(user_id, isbn, "not_available")
 
         except Exception as e:
             print(f"[Readmoo Worker] 執行過程發生例外錯誤: {e}")

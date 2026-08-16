@@ -7,7 +7,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
-from app.database import get_session
+from app.database import engine, get_session
 from app.models import Book, Purchase, WishlistItem
 from app.observability import run_sync_job
 from app.services.kobo_worker import (
@@ -28,6 +28,7 @@ from app.services.readmoo_worker import (
 
 router = APIRouter(tags=["Wishlist"])
 SUPPORTED_PLATFORMS = {"readmoo", "kobo"}
+RETRYABLE_WISHLIST_STATUSES = {"pending", "failed", "auth_expired"}
 
 
 class WishlistCreate(BaseModel):
@@ -194,6 +195,53 @@ def _serialize_wishlist(
     return sorted(result, key=lambda row: row["title"])
 
 
+async def _retry_wishlist_additions(
+    user_id: str,
+    platform: str,
+    add_worker,
+) -> dict[str, int]:
+    """Retry local additions after a successful remote snapshot import."""
+    with Session(engine) as db:
+        candidates = db.exec(
+            select(WishlistItem).where(
+                WishlistItem.user_id == user_id,
+                WishlistItem.platform == platform,
+                WishlistItem.sync_status.in_(RETRYABLE_WISHLIST_STATUSES),
+            )
+        ).all()
+        candidate_isbns = [item.isbn for item in candidates]
+
+    for isbn in candidate_isbns:
+        await add_worker(user_id, isbn)
+
+    counts = {
+        "attempted": len(candidate_isbns),
+        "synced": 0,
+        "not_available": 0,
+        "failed": 0,
+    }
+    if not candidate_isbns:
+        return counts
+
+    with Session(engine) as db:
+        retried_items = db.exec(
+            select(WishlistItem).where(
+                WishlistItem.user_id == user_id,
+                WishlistItem.platform == platform,
+                WishlistItem.isbn.in_(candidate_isbns),
+            )
+        ).all()
+        for item in retried_items:
+            status = item.sync_status
+            if status == "synced":
+                counts["synced"] += 1
+            elif status == "not_available":
+                counts["not_available"] += 1
+            else:
+                counts["failed"] += 1
+    return counts
+
+
 @router.post("/import")
 async def trigger_wishlist_import(
     user_id: str = Query(..., description="使用者 ID"),
@@ -201,20 +249,27 @@ async def trigger_wishlist_import(
     # Run sequentially: each platform uses Chromium and a 4 GB VPS should not
     # launch both browser sessions at once.  The response preserves the exact
     # platform outcome so the UI never mistakes a failed login for an empty list.
-    results = [
-        await run_sync_job(
+    results = []
+    for platform, importer, add_worker in (
+        ("readmoo", import_readmoo_wishlist_to_db, add_to_readmoo_wishlist),
+        ("kobo", import_kobo_wishlist_to_db, add_to_kobo_wishlist),
+    ):
+        result = await run_sync_job(
             "wishlist_import",
-            "readmoo",
-            import_readmoo_wishlist_to_db,
+            platform,
+            importer,
             user_id,
-        ),
-        await run_sync_job(
-            "wishlist_import",
-            "kobo",
-            import_kobo_wishlist_to_db,
-            user_id,
-        ),
-    ]
+        )
+        if result["status"] == "success":
+            result = {
+                **result,
+                "retry": await _retry_wishlist_additions(
+                    user_id,
+                    platform,
+                    add_worker,
+                ),
+            }
+        results.append(result)
     statuses = {result["platform"]: result["status"] for result in results}
     blocked = [
         result["platform"] for result in results

@@ -10,7 +10,7 @@ from fastapi import BackgroundTasks, HTTPException
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from app.api import auth, readmoo_replication
+from app.api import auth, readmoo_replication, wishlist as wishlist_api
 from app.services import kobo_worker, platform_auth, readmoo_worker
 from app.services.kobo_library_worker import (
     KoboLibrarySnapshotIncomplete,
@@ -1247,6 +1247,113 @@ class PlatformStatusTests(unittest.TestCase):
             timeout=20000,
         )
 
+    def test_kobo_search_does_not_fall_back_to_unmatched_first_result(self):
+        link = unittest.mock.Mock()
+        link.evaluate = AsyncMock(return_value="完全不同的書")
+        links = unittest.mock.Mock()
+        links.count = AsyncMock(return_value=1)
+        links.nth.return_value = link
+        page = unittest.mock.Mock()
+        page.wait_for_selector = AsyncMock()
+        page.locator.return_value = links
+
+        with patch.object(
+            kobo_worker,
+            "_wait_for_kobo_human_verification",
+            AsyncMock(return_value=True),
+        ):
+            result = asyncio.run(kobo_worker._find_kobo_search_result(
+                page,
+                "克拉拉與太陽",
+            ))
+
+        self.assertIsNone(result)
+
+    def test_kobo_waits_until_wishlist_state_really_changes(self):
+        page = unittest.mock.Mock()
+        page.wait_for_timeout = AsyncMock()
+        button = unittest.mock.Mock()
+        with patch.object(
+            kobo_worker,
+            "_kobo_wishlist_button_active",
+            AsyncMock(side_effect=[False, True]),
+        ):
+            changed = asyncio.run(kobo_worker._wait_for_kobo_wishlist_state(
+                page,
+                button,
+                True,
+                attempts=2,
+            ))
+
+        self.assertTrue(changed)
+        self.assertEqual(page.wait_for_timeout.await_count, 1)
+
+    def test_kobo_challenge_timeout_is_not_treated_as_missing_book(self):
+        page = unittest.mock.Mock()
+        with patch.object(
+            kobo_worker,
+            "_wait_for_kobo_human_verification",
+            AsyncMock(return_value=False),
+        ):
+            with self.assertRaises(kobo_worker.KoboHumanVerificationTimeout):
+                asyncio.run(kobo_worker._find_kobo_search_result(
+                    page,
+                    "克拉拉與太陽",
+                ))
+
+    def test_platform_sync_retries_failures_but_skips_unavailable_books(self):
+        test_engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        SQLModel.metadata.create_all(test_engine)
+        with Session(test_engine) as session:
+            session.add_all([
+                Book(isbn="failed-book", title="重試這本"),
+                Book(isbn="missing-book", title="平台沒有這本"),
+                WishlistItem(
+                    user_id="reader",
+                    platform="readmoo",
+                    isbn="failed-book",
+                    sync_status="failed",
+                ),
+                WishlistItem(
+                    user_id="reader",
+                    platform="readmoo",
+                    isbn="missing-book",
+                    sync_status="not_available",
+                ),
+            ])
+            session.commit()
+
+        async def successful_retry(user_id, isbn):
+            with Session(test_engine) as session:
+                item = session.exec(
+                    select(WishlistItem).where(
+                        WishlistItem.user_id == user_id,
+                        WishlistItem.platform == "readmoo",
+                        WishlistItem.isbn == isbn,
+                    )
+                ).one()
+                item.sync_status = "synced"
+                session.add(item)
+                session.commit()
+
+        with patch.object(wishlist_api, "engine", test_engine):
+            result = asyncio.run(wishlist_api._retry_wishlist_additions(
+                "reader",
+                "readmoo",
+                successful_retry,
+            ))
+
+        self.assertEqual(result, {
+            "attempted": 1,
+            "synced": 1,
+            "not_available": 0,
+            "failed": 0,
+        })
+
     def test_kobo_search_result_opens_href_without_clicking_hidden_link(self):
         link = unittest.mock.Mock()
         link.get_attribute = AsyncMock(return_value=(
@@ -1570,6 +1677,16 @@ class PlatformStatusTests(unittest.TestCase):
                     "status": "success",
                     "books": 2,
                     "message": "ok",
+                }),
+            ),
+            patch.object(
+                wishlist_api,
+                "_retry_wishlist_additions",
+                AsyncMock(return_value={
+                    "attempted": 0,
+                    "synced": 0,
+                    "not_available": 0,
+                    "failed": 0,
                 }),
             ),
         ):

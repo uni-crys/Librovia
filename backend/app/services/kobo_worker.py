@@ -29,6 +29,34 @@ KOBO_SEARCH_RESULT_SELECTOR = (
     "a[href*='/ebook/']"
 )
 
+
+class KoboHumanVerificationTimeout(RuntimeError):
+    pass
+
+
+async def _kobo_wishlist_button_active(wishlist_btn) -> bool:
+    btn_html = await wishlist_btn.evaluate("el => el.outerHTML")
+    btn_text = (await wishlist_btn.inner_text()).strip()
+    return bool(
+        "移除" in btn_text
+        or "remove-from-wishlist" in btn_html
+        or "已在" in btn_text
+        or 'aria-pressed="true"' in btn_html
+    )
+
+
+async def _wait_for_kobo_wishlist_state(
+    page,
+    wishlist_btn,
+    expected_active: bool,
+    attempts: int = 20,
+) -> bool:
+    for _ in range(attempts):
+        if await _kobo_wishlist_button_active(wishlist_btn) == expected_active:
+            return True
+        await page.wait_for_timeout(500)
+    return False
+
 def get_user_state_path(user_id: str) -> Path:
     return BASE_DIR / "user_profiles" / user_id / "kobo" / "state.json"
 
@@ -101,7 +129,7 @@ async def _execute_kobo_wishlist_action(user_id: str, isbn: str, action: str):
 
             if "/ebook/" not in page.url:
                 print(f"[Kobo Worker] 停留在搜尋列表，尋找書籍連結...")
-                book_link = await _find_kobo_search_result(page)
+                book_link = await _find_kobo_search_result(page, book_title)
                 
                 if book_link is None and book_title:
                     print(f"[Kobo Worker] ISBN 無結果，改用書名搜尋...")
@@ -124,7 +152,7 @@ async def _execute_kobo_wishlist_action(user_id: str, isbn: str, action: str):
                             return
                     else:
                         print(f"[Kobo Worker] 在 Kobo 平台上找不到目標書籍")
-                        _update_sync_status(user_id, isbn, "failed")
+                        _update_sync_status(user_id, isbn, "not_available")
                         return
             
             print(f"[Kobo Worker] 已成功進入書籍內頁，準備操作願望清單...")
@@ -138,10 +166,10 @@ async def _execute_kobo_wishlist_action(user_id: str, isbn: str, action: str):
             wishlist_btn = page.locator("button:has-text('願望清單'), button:has-text('移除')").locator("visible=true").first
 
             if await wishlist_btn.count() > 0:
-                btn_html = await wishlist_btn.evaluate("el => el.outerHTML")
                 btn_text = (await wishlist_btn.inner_text()).strip()
-                
-                is_already_in_wishlist = "移除" in btn_text or "remove-from-wishlist" in btn_html or "已在" in btn_text
+                is_already_in_wishlist = (
+                    await _kobo_wishlist_button_active(wishlist_btn)
+                )
                 print(f"[Kobo Worker] 找到願望清單按鈕，當前文字: [{btn_text}]")
 
                 if action == "add":
@@ -151,17 +179,31 @@ async def _execute_kobo_wishlist_action(user_id: str, isbn: str, action: str):
                     else:
                         print(f"[Kobo Worker] 執行點擊「新增至願望清單」...")
                         await wishlist_btn.click(force=True)
-                        await page.wait_for_timeout(3000)
-                        print(f"[Kobo Worker] 成功點擊新增！")
-                        _update_sync_status(user_id, isbn, "synced")
+                        if await _wait_for_kobo_wishlist_state(
+                            page,
+                            wishlist_btn,
+                            True,
+                        ):
+                            print(f"[Kobo Worker] 已確認新增至願望清單！")
+                            _update_sync_status(user_id, isbn, "synced")
+                        else:
+                            print("[Kobo Worker] 點擊後未確認願望清單狀態已更新")
+                            _update_sync_status(user_id, isbn, "failed")
 
                 elif action == "remove":
                     if is_already_in_wishlist:
                         print(f"[Kobo Worker] 執行點擊「移除」願望清單...")
                         await wishlist_btn.click(force=True)
-                        await page.wait_for_timeout(3000)
-                        print(f"[Kobo Worker] 成功從願望清單移除！")
-                        _update_sync_status(user_id, isbn, "removed")
+                        if await _wait_for_kobo_wishlist_state(
+                            page,
+                            wishlist_btn,
+                            False,
+                        ):
+                            print(f"[Kobo Worker] 已確認從願望清單移除！")
+                            _update_sync_status(user_id, isbn, "removed")
+                        else:
+                            print("[Kobo Worker] 點擊後未確認願望清單狀態已移除")
+                            _update_sync_status(user_id, isbn, "failed")
                     else:
                         print(f"[Kobo Worker] 該書籍原本就不在願望清單中，無須移除。")
                         _update_sync_status(user_id, isbn, "removed")
@@ -270,7 +312,9 @@ def _normalize_kobo_search_text(value: str | None) -> str:
 async def _find_kobo_search_result(page, book_title: str | None = None):
     """Wait for Kobo's client-rendered search cards and return a product link."""
     if not await _wait_for_kobo_human_verification(page):
-        return None
+        raise KoboHumanVerificationTimeout(
+            "Kobo human verification did not complete on search page"
+        )
     try:
         await page.wait_for_selector(
             KOBO_SEARCH_RESULT_SELECTOR,
@@ -301,7 +345,7 @@ async def _find_kobo_search_result(page, book_title: str | None = None):
         }""")
         if expected and expected in _normalize_kobo_search_text(card_text):
             return link
-    return links.nth(0)
+    return links.nth(0) if not book_title else None
 
 
 async def _open_kobo_search_result(page, book_link) -> bool:

@@ -1244,6 +1244,15 @@ input:focus-visible {
   background: #bd5545;
 }
 
+.sync-chip--not_available {
+  color: #75633b;
+  background: #f7f0dc;
+}
+
+.sync-chip--not_available i {
+  background: #b98a32;
+}
+
 .wishlist-card__actions {
   display: flex;
   align-items: center;

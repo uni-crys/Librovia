@@ -23,6 +23,7 @@ const STATUS_LABELS = {
   pending: '等待同步',
   synced: '已同步',
   failed: '同步失敗',
+  not_available: '平台沒有此書',
   auth_expired: '登入失效',
   removed: '已移除',
 };
